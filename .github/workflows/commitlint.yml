@@ -35,8 +35,10 @@ jobs:
             chore
             revert
           requireScope: false
-          # Subject must not start with an uppercase letter (e.g. "feat: Add x")
-          subjectPattern: ^(?![A-Z]).+$
+          # Subject must not start with a capitalized word ("feat: Add x"),
+          # but may start with an acronym ("feat: MCP server ...").
+          subjectPattern: ^(?![A-Z][a-z]).+$
           subjectPatternError: |
-            The subject "{subject}" in PR title "{title}" must start with a
-            lowercase letter, e.g. "feat: add outlier detection".
+            The subject "{subject}" in PR title "{title}" must not start with
+            a capitalized word, e.g. use "feat: add outlier detection".
+            Acronyms like "MCP" are fine.
