@@ -1,0 +1,18 @@
+# Normalize all text files to LF in the repo and in the working tree, so
+# Windows checkouts and Linux CI runners see identical bytes.
+* text=auto eol=lf
+
+# Windows-only scripts keep CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files: never touch line endings
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.zip binary
+*.xlsx binary
+*.xls binary

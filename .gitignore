@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- data-quality-mcp specific ---
+# Local datasets: never commit real data (fixtures live in tests/fixtures/)
+data/
+
+# OS files
+.DS_Store
+Thumbs.db
