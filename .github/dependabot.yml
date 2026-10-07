@@ -1,0 +1,26 @@
+version: 2
+updates:
+  # Python dependencies (pyproject.toml + uv.lock)
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+    commit-message:
+      prefix: "build"
+      include: "scope"
+
+  # Versions of the GitHub Actions used in .github/workflows
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"

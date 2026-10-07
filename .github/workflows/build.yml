@@ -1,0 +1,41 @@
+name: Build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  package:
+    name: Build package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v10.1.0
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Check package metadata
+        run: uvx twine check --strict dist/*
+
+      # Install the built wheel into a clean environment (no repo source on
+      # the path) and build the server, to catch packaging mistakes.
+      - name: Smoke-test the installed wheel
+        run: |
+          uv run --isolated --no-project --with dist/*.whl python -c "
+          from data_quality_mcp.server import create_server
+          create_server()
+          "
+
+  # Docker image build is added in Milestone 4.
