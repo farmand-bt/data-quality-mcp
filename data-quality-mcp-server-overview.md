@@ -15,13 +15,14 @@ An MCP (Model Context Protocol) server that exposes the core logic of the Data Q
 | Component              | Tool / Library                          | Why                                                                 |
 |------------------------|------------------------------------------|----------------------------------------------------------------------|
 | Language               | Python 3.10+                            | Required by the current MCP Python SDK                              |
-| MCP SDK                | `mcp` (official Python SDK, FastMCP API) | Official SDK — bundles the high-level FastMCP decorator interface   |
+| MCP SDK                | `mcp[cli]` v2 (official Python SDK, `MCPServer` API) | Official SDK. v2 renamed v1's `FastMCP` to `MCPServer` (`from mcp.server import MCPServer`); decorators are unchanged |
 | Data manipulation      | `pandas`                                 | Same as the original Data Quality Analyzer                          |
 | Statistical analysis   | `scipy`, `numpy`                         | Outlier detection, distributions, correlations                      |
 | File handling          | `openpyxl`                               | Excel (.xlsx) support                                                |
 | Packaging              | `pyproject.toml`, `src/` layout          | Modern, installable Python package layout                           |
 | Code quality           | `ruff`                                   | Linter + formatter                                                  |
-| Testing                | `pytest`                                 | Unit tests for tools and core logic                                 |
+| Testing                | `pytest`, `pytest-cov`, anyio plugin     | Unit tests for core logic; in-memory `mcp.Client` tests for tools   |
+| Environment / tasks    | `uv`, GNU `make`                         | `uv sync` manages `.venv` + `uv.lock`; `make` wraps common commands |
 | Debugging (dev only)   | MCP Inspector (bundled with the SDK)     | Interactive tool for testing tools/resources/prompts before wiring to a real client |
 | Transport (Milestone 4)| Streamable HTTP (via SDK)                | Lets the server run remotely, not just locally over stdio           |
 | Containerization (M4)  | Docker                                   | Standard way to deploy an MCP server remotely                       |
@@ -92,16 +93,18 @@ data-quality-mcp/
 ├── src/
 │   └── data_quality_mcp/
 │       ├── __init__.py
-│       ├── server.py                # Creates the FastMCP app, calls each tools module's register(app), runs it
+│       ├── server.py                # Creates the MCPServer app, calls each tools module's register(app), runs it
 │       ├── config.py                # Settings: size limits, thresholds (no mcp imports)
 │       │
 │       ├── profiler_core/           # Vendored + simplified profiling engine (pure Python)
 │       │   ├── __init__.py
-│       │   ├── exceptions.py        # Domain errors (DataLoadError, FileTooLargeError, ...)
+│       │   ├── exceptions.py        # Domain errors (DataQualityError base, FileTooLargeError, ...)
 │       │   ├── loader.py            # Loads from file_path OR inline_content
 │       │   ├── type_detector.py
 │       │   ├── stats.py
 │       │   ├── missing.py
+│       │   ├── schema.py            # Report contract as TypedDicts (source of the tool's output schema)
+│       │   ├── json_safe.py         # numpy/pandas values -> strict-JSON-safe Python values
 │       │   ├── outliers.py          # Added Milestone 2
 │       │   ├── duplicates.py        # Added Milestone 2
 │       │   ├── correlations.py      # Added Milestone 2
@@ -118,13 +121,14 @@ data-quality-mcp/
 │       │
 │       └── tools/                   # Thin MCP-facing layer — with server.py, the only code that imports `mcp`
 │           ├── __init__.py
-│           ├── profiling_tools.py   # Plain functions + register(app: FastMCP)
+│           ├── profiling_tools.py   # Plain functions + register(app: MCPServer)
 │           ├── cleaning_tools.py    # Added Milestone 3
 │           ├── resources.py         # Added Milestone 2
 │           └── prompts.py           # Added Milestone 2
 │
 ├── tests/
-│   ├── test_architecture.py         # Fails if core packages import mcp
+│   ├── conftest.py
+│   ├── test_architecture.py         # Fails if core packages import mcp, or if src/ calls print()
 │   ├── test_loader.py
 │   ├── test_profiler_core.py
 │   ├── test_cleaner_core.py
@@ -163,10 +167,10 @@ This project is built across 5 milestones — deliberately fewer and lighter tha
 
 **Important for scaffolding decisions made now:**
 - **The core/tools boundary is the single most important structural decision in this project.** `profiler_core/`, `cleaner_core/`, and `config.py` must never import anything from `mcp`. They should be plain, testable Python that could be reused outside an MCP context. Only `tools/` and `server.py` touch the MCP SDK — this keeps the core logic transport-agnostic ahead of Milestone 4, when a second transport (HTTP) is added alongside stdio.
-- **Registration pattern (avoids circular imports and keeps the boundary clean):** each `tools/*.py` module defines plain functions plus a `register(app: FastMCP) -> None` function that registers them. `server.py` creates the app, calls each module's `register(app)`, and runs it. Tool modules never import a global app object from `server.py`.
+- **Registration pattern (avoids circular imports and keeps the boundary clean):** each `tools/*.py` module defines plain functions plus a `register(app: MCPServer) -> None` function that registers them. `server.py` creates the app, calls each module's `register(app)`, and runs it. Tool modules never import a global app object from `server.py`.
 - **The boundary is enforced by a test, not by review alone:** `tests/test_architecture.py` walks `profiler_core/` and `cleaner_core/` (and `config.py`) and fails on any `import mcp` / `from mcp`.
 - `profiler_core/loader.py` should be designed from Milestone 1 to accept either a `file_path` or `inline_content` (even though only `file_path` is wired to a tool until Milestone 3). Retrofitting this later would mean touching every tool signature.
-- Every tool's docstring and type hints matter more here than in a typical project — FastMCP derives the schema and description an agent sees directly from them. Write them as if a language model, not a human, is the only reader.
+- Every tool's docstring and type hints matter more here than in a typical project — the SDK's `MCPServer` derives the schema and description an agent sees directly from them. Write them as if a language model, not a human, is the only reader.
 
 ---
 
@@ -250,32 +254,29 @@ Since this server may eventually be reachable over the internet (Milestone 4), s
 
 ## Quick Reference Commands
 
-> **Development platform is Windows 11.** The commands below are POSIX-style; Milestone 1 must confirm Windows equivalents (e.g. `.venv\Scripts\activate`), check whether `make` is available (it usually isn't by default — install it via Git Bash/Chocolatey/Scoop or use an alternative task runner), and make sure client configs use an absolute path to the venv's `python.exe` (or `uv`).
+> **Development platform is Windows 11.** Everything runs through `uv` (manages `.venv` and `uv.lock`) and GNU `make` (installed with `winget install ezwinports.make`). Client configs must use absolute paths (see `examples/claude_desktop_config.json`).
 
 ```bash
 # Setup
-git clone <repo-url> && cd data-quality-mcp
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
+git clone https://github.com/farmand-bt/data-quality-mcp.git && cd data-quality-mcp
+make install            # = uv sync (creates .venv with dev dependencies)
 
-# Run the server (stdio transport)
-python -m data_quality_mcp.server
+# Run the server (stdio transport; normally an MCP client launches it)
+make run                # = uv run data-quality-mcp
 
-# Run with the MCP Inspector for interactive testing
-# (verify the exact current command against the SDK's own docs — this has changed before)
-mcp dev src/data_quality_mcp/server.py
+# Open the MCP Inspector (needs Node.js / npx)
+make dev                # = uv run mcp dev src/data_quality_mcp/server.py:app
 
-# Lint & format
-ruff check --fix .
-ruff format .
+# Lint (what CI runs) / auto-fix and format
+make lint
+make format
 
-# Run tests
-pytest tests/
+# Run tests with coverage
+make test               # = uv run pytest --cov
 
-# Generate a messy test dataset
-python scripts/generate_messy_data.py
+# Regenerate the synthetic test/example datasets
+make generate-data
 ```
-
 ---
 
 ## Milestone 1: Project Scaffolding + Core Profiling + First Tool (IMPLEMENT NOW)
@@ -305,6 +306,7 @@ python scripts/generate_messy_data.py
    - `MAX_FILE_SIZE_MB = 50`
    - `MAX_ROWS = 500_000`
    - `MISSING_THRESHOLD = 0.30`
+   - `HIGH_CARDINALITY_THRESHOLD = 0.5` (added during implementation; used by the type detector)
    - `OUTLIER_IQR_MULTIPLIER = 1.5`
    - `OUTLIER_ZSCORE_THRESHOLD = 3.0`
    - `HIGH_CORRELATION_THRESHOLD = 0.9`
@@ -324,10 +326,10 @@ python scripts/generate_messy_data.py
 7. Create `src/data_quality_mcp/tools/profiling_tools.py`:
    - `profile_dataset(file_path: str) -> dict` — a thin wrapper: calls `loader.load_data`, then `report.generate_report`, returns the dict
    - Catches domain exceptions and turns them into clear MCP tool errors
-   - `register(app: FastMCP) -> None` registers the tool on the app passed in
+   - `register(app: MCPServer) -> None` registers the tool on the app passed in
    - Write a deliberately clear, complete docstring — this is what an agent will read to decide when and how to call the tool
 8. Create `src/data_quality_mcp/server.py`:
-   - Instantiate the FastMCP app
+   - Instantiate the `MCPServer` app (v2 name for v1's FastMCP)
    - Call `profiling_tools.register(app)`
    - `main()` entry point (wired to the console script and `if __name__ == "__main__"`) that runs over stdio transport
    - Logging configured to stderr only — no `print()` anywhere

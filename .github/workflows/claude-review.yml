@@ -1,0 +1,66 @@
+name: Claude Code Review
+
+# Advisory review, not a required check: it runs on the Claude Pro
+# subscription (CLAUDE_CODE_OAUTH_TOKEN), so a usage limit must never block a
+# merge. To pause it, disable this workflow in the Actions tab.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  # A newer push cancels the review of the previous one
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: Claude review
+    # Skip drafts, PRs from forks, and Dependabot (neither has access to secrets)
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: anthropics/claude-code-action@v1.0.231
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request. The PR branch is checked out in the
+            working directory. Read CLAUDE.md first: it lists this project's
+            invariants. Check the diff against them, in this priority order:
+
+            1. Layer boundary: profiler_core/, cleaner_core/ and config.py must
+               never import `mcp`; tools/ must be thin adapters with no real
+               logic; tool modules use the register(app) pattern.
+            2. Correctness bugs and unhandled edge cases (empty data, all-NaN
+               columns, pandas 2 vs pandas 3 differences, Windows paths).
+            3. Output contract: tool output matches profiler_core/schema.py, is
+               strict-JSON-safe (no NaN/inf/numpy types), and uncomputed
+               fields are null rather than 0.
+            4. Errors: the core raises DataQualityError subclasses; tools map
+               them to ToolError with actionable messages.
+            5. No print() under src/ (stdout is the stdio protocol channel).
+            6. Missing or weak tests for the changed behavior.
+            7. Security issues (path handling, resource limits, untrusted input).
+
+            Be concise and specific. Use inline comments for issues tied to a
+            line and one top-level summary comment (via `gh pr comment`) for
+            the overall verdict. Don't comment on style that ruff already
+            enforces. If everything looks good, say so briefly. Only post
+            GitHub comments; don't submit review text as messages.
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
