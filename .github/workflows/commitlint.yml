@@ -36,8 +36,9 @@ jobs:
             revert
           requireScope: false
           # Subject must not start with a capitalized word ("feat: Add x"),
-          # but may start with an acronym ("feat: MCP server ...").
-          subjectPattern: ^(?![A-Z][a-z]).+$
+          # but may start with an acronym ("feat: MCP server ..."). Dependabot
+          # always writes "Bump ...", which it can't be configured to change.
+          subjectPattern: ^(?:(?![A-Z][a-z]).+|Bump .+)$
           subjectPatternError: |
             The subject "{subject}" in PR title "{title}" must not start with
             a capitalized word, e.g. use "feat: add outlier detection".
