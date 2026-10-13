@@ -155,12 +155,12 @@ data-quality-mcp/
 
 ## Milestone Roadmap (Summary)
 
-This project is built across 5 milestones — deliberately fewer and lighter than your previous two projects, since there's no UI layer here. **Milestone 1 is detailed in full below.** Subsequent milestones will be provided one at a time.
+This project is built across 5 milestones — deliberately fewer and lighter than your previous two projects, since there's no UI layer here. Each milestone has its own spec in this folder (`planning/milestone-N.md`), written and reviewed as a `docs:` PR before implementation starts.
 
 | Milestone | Focus                                | What it adds                                                                 |
 |-----------|---------------------------------------|-------------------------------------------------------------------------------|
-| **1**     | **Scaffolding + Core Profiling**      | Repo setup, `profiler_core` (types/stats/missing), first tool (`profile_dataset`) over stdio |
-| **2**     | **Expanded Tool Surface**             | Outliers, duplicates, correlations, recommendations tools; a resource; a prompt |
+| **1** ✅  | **Scaffolding + Core Profiling** ([spec](milestone-1.md)) | Repo setup, `profiler_core` (types/stats/missing), first tool (`profile_dataset`) over stdio |
+| **2**     | **Expanded Tool Surface** ([spec](milestone-2.md)) | Outliers, duplicates, correlations, recommendations tools; a resource; a prompt |
 | **3**     | **Flexible Input + Cleaning Tools**   | Inline data support (not just file paths), cleaning tools ported from the cleaner engine |
 | **4**     | **Remote Deployment**                 | Streamable HTTP transport, Docker, minimal auth, a live deployment            |
 | **5**     | **Polish & Docs**                     | README with connection guides, full test pass, optional MCP registry listing  |
@@ -212,7 +212,7 @@ Every profiling tool returns JSON matching this shape. Fields not yet computed a
 pandas/numpy values (`np.int64`, `np.float64`, `np.bool_`, `NaN`, `NaT`, `pd.Timestamp`) are not JSON-serializable, or serialize incorrectly (`NaN` is not valid JSON). `report.py` is responsible for guaranteeing that everything it returns is native Python (`int`, `float`, `bool`, `str`, `None`, `list`, `dict`), with `NaN`/`NaT` → `None` and timestamps → ISO strings. A test asserts `json.dumps(report, allow_nan=False)` succeeds on the messy fixture.
 
 ### Error Handling
-The core raises its own domain exceptions, defined in `profiler_core/exceptions.py` (e.g. `DataLoadError`, `UnsupportedFormatError`, `FileTooLargeError`, `TooManyRowsError`). The core never raises or constructs MCP-specific errors. The `tools/` layer catches domain exceptions and turns them into clear MCP tool errors whose messages tell the calling agent what went wrong and how to fix the call.
+The core raises its own domain exceptions, defined in `profiler_core/exceptions.py` (base class `DataQualityError`; e.g. `UnsupportedFormatError`, `FileTooLargeError`, `TooManyRowsError`). The core never raises or constructs MCP-specific errors. The `tools/` layer catches domain exceptions and turns them into clear MCP tool errors whose messages tell the calling agent what went wrong and how to fix the call.
 
 ### Configurable Thresholds
 `config.py` holds the defaults, but core functions take thresholds and limits as keyword parameters (e.g. `missing_threshold: float = config.MISSING_THRESHOLD`) instead of reading globals deep inside the logic. That way the HTTP deployment in Milestone 4 can override limits without touching the core.
@@ -221,7 +221,7 @@ The core raises its own domain exceptions, defined in `profiler_core/exceptions.
 Over stdio, stdout *is* the JSON-RPC channel — any stray `print()` corrupts the protocol and breaks the client connection, often with no obvious error. No `print()` anywhere in the package; all logging goes to stderr through the `logging` module.
 
 ### Quality Score
-`quality_score` (0–100) and `quality_grade` must come from a deterministic, documented formula — not an ad-hoc one invented during implementation. In Milestone 1 only completeness (missing values) and type consistency (type mismatches) are available, so the formula should be a weighted-penalty model over those components, designed so later components (duplicates, outliers) can be added in Milestone 2 without changing its shape. The exact weights are to be proposed in the Milestone 1 plan, approved, and written up in `docs/architecture.md`. Grades map from score via `QUALITY_GRADE_THRESHOLDS`.
+`quality_score` (0–100) and `quality_grade` must come from a deterministic, documented formula — not an ad-hoc one invented during implementation. In Milestone 1 only completeness (missing values) and type consistency (type mismatches) are available, so the formula should be a weighted-penalty model over those components, designed so later components (duplicates, outliers) can be added in Milestone 2 without changing its shape. The formula and weights were approved in Milestone 1 and are documented in [`docs/architecture.md`](../docs/architecture.md#quality-score-milestone-1-formula). Grades map from score via `QUALITY_GRADE_THRESHOLDS`.
 
 ### Dual Input Mode
 Tools need to work both when the server runs locally over stdio (where reading a file path on disk is natural) and when it's deployed remotely over HTTP (where the server has no access to the caller's filesystem, so the caller must send the data itself). `loader.py` should accept `file_path: str | None` and `inline_content: str | None` (base64-encoded) from the start, even though the inline path isn't exercised by a real tool until Milestone 3.
@@ -233,17 +233,17 @@ This server does not call an LLM at any point. It's intentionally pure, determin
 Carried over from the Data Quality Analyzer: cleaning tools (Milestone 3) never mutate in place, and every transformation is logged with what was done, to which column, and how many rows were affected.
 
 ### PR-Gated Workflow and CI
-Every change (feature, fix, refactor, docs) goes through a branch and a PR. Nothing is pushed directly to `main`. A branch ruleset on `main` requires a PR, requires all CI checks to pass, blocks direct pushes, and allows squash merge only. Because the PR title becomes the squash commit message, commitlint checks the PR title.
+Every change (feature, fix, refactor, docs) goes through a branch and a PR. The `main protection` ruleset requires a PR and the required CI checks (Lint, Test, Build, Security and Commitlint jobs), and blocks force pushes and branch deletion. The repo allows squash merge only and deletes merged branches automatically. The repository admin (the owner) is a bypass actor, so a deliberate direct push or force push is still possible. Claude sessions and Dependabot always go through PRs. Because the PR title becomes the squash commit message, commitlint checks the PR title. If the test matrix or a job name changes, the ruleset's required-check list must be updated too.
 
 | Workflow            | Trigger                         | Checks                                                                 |
 |---------------------|----------------------------------|-------------------------------------------------------------------------|
 | `commitlint.yml`    | pull_request                     | PR title matches Conventional Commits                                  |
 | `lint.yml`          | pull_request, push to `main`     | `ruff check`, `ruff format --check`                                    |
-| `test.yml`          | pull_request, push to `main`     | `pytest` with coverage; matrix: `ubuntu-latest` + `windows-latest` × Python 3.10–3.13 |
-| `build.yml`         | pull_request, push to `main`     | `python -m build`, `twine check dist/*`; Docker build from M4         |
+| `test.yml`          | pull_request, push to `main`     | `pytest` with coverage; Ubuntu × Python 3.10–3.14, Windows × 3.10 and 3.14 (covers pandas 2 and 3) |
+| `build.yml`         | pull_request, push to `main`     | `uv build`, `twine check --strict`, installed-wheel smoke test; Docker build from M4 |
 | `security.yml`      | pull_request, push to `main`, weekly | `pip-audit` (dependency CVEs), Bandit (code), CodeQL (Python)       |
 | `claude-review.yml` | pull_request                     | `anthropics/claude-code-action` review, authenticated via a `CLAUDE_CODE_OAUTH_TOKEN` repo secret generated with `claude setup-token` (uses the Pro subscription, no API key). Advisory, not a required check, so a usage limit can't block merges. Can be disabled if usage runs high. |
-| Dependabot          | weekly                           | pip and GitHub Actions version updates                                 |
+| Dependabot          | weekly                           | `uv` and GitHub Actions version updates, one grouped PR each           |
 
 Action versions are pinned to a specific release, and each workflow sets minimal `permissions:`.
 
@@ -277,73 +277,3 @@ make test               # = uv run pytest --cov
 # Regenerate the synthetic test/example datasets
 make generate-data
 ```
----
-
-## Milestone 1: Project Scaffolding + Core Profiling + First Tool (IMPLEMENT NOW)
-
-**Goal:** A working MCP server, connectable via stdio, exposing a single `profile_dataset` tool that returns a real quality report.
-
-**Tasks:**
-
-0. **Before writing any code:** use plan mode to research current conventions rather than relying on training data, which may be stale for a fast-moving protocol like this one. Specifically look up:
-   - The current official MCP Python SDK: exact package name and version, and the current `FastMCP` decorator syntax for tools (`@mcp.tool()`), resources, and prompts (check https://modelcontextprotocol.io/docs and the SDK's GitHub repo)
-   - The current recommended way to run/debug a server locally (the MCP Inspector command may not be exactly `mcp dev <file>` anymore)
-   - The current Claude Desktop and Cursor MCP config file formats, so `examples/claude_desktop_config.json` is accurate — **including the Windows form** (absolute path to the venv `python.exe` or `uv`)
-   - The SDK's in-memory client/session testing utility, for `tests/test_tools.py`
-   - Whether `make` is available on this Windows machine, and if not, what to use instead
-   
-   Propose a scaffolding plan based on what's actually current, then proceed. The plan must also include:
-   - The proposed `quality_score` formula and weights (see Key Design Decisions → Quality Score)
-   - How the `register(app)` pattern will look concretely in `server.py` and `tools/profiling_tools.py`
-
-1. Git repo already exists; add `.gitignore` (`.env`, `__pycache__/`, `*.pyc`, `.venv/`, `data/`)
-2. Create `pyproject.toml` with a `src/` layout, a console-script entry point for the server, and dependencies:
-   - `mcp` (version confirmed in step 0; likely the `mcp[cli]` extra so the Inspector works)
-   - `pandas`, `numpy`, `scipy`
-   - `openpyxl`
-   - `ruff`, `pytest` (dev dependencies)
-3. Create `src/data_quality_mcp/config.py`:
-   - `MAX_FILE_SIZE_MB = 50`
-   - `MAX_ROWS = 500_000`
-   - `MISSING_THRESHOLD = 0.30`
-   - `HIGH_CARDINALITY_THRESHOLD = 0.5` (added during implementation; used by the type detector)
-   - `OUTLIER_IQR_MULTIPLIER = 1.5`
-   - `OUTLIER_ZSCORE_THRESHOLD = 3.0`
-   - `HIGH_CORRELATION_THRESHOLD = 0.9`
-   - `QUALITY_GRADE_THRESHOLDS = {"A": 90, "B": 80, "C": 70, "D": 60}`
-4. Create `src/data_quality_mcp/profiler_core/loader.py`:
-   - `load_data(file_path: str | None = None, inline_content: str | None = None, filename_hint: str | None = None) -> pd.DataFrame`
-   - Supports `.csv` and `.xlsx`
-   - Raises a clear domain error if neither or both inputs are given
-   - Enforces `MAX_FILE_SIZE_MB` and `MAX_ROWS` (accepted as parameters, defaulting to config)
-   - All errors are domain exceptions from `profiler_core/exceptions.py` (create this file in this step)
-5. Create `src/data_quality_mcp/profiler_core/type_detector.py`, `stats.py`, `missing.py` — ported and simplified from the Data Quality Analyzer's equivalents (numeric/categorical/datetime/boolean/text/mixed detection; per-column stats; missing value counts and percentages). Thresholds are keyword parameters with config defaults.
-6. Create `src/data_quality_mcp/profiler_core/report.py`:
-   - `generate_report(df: pd.DataFrame, name: str, source: str) -> dict` matching the schema in Key Design Decisions
-   - `outliers`, `duplicates`, and `correlations` are `null` and `recommendations` is `[]` until Milestone 2
-   - Computes `quality_score` / `quality_grade` with the formula approved in step 0
-   - Output is fully JSON-safe (native Python types, `NaN` → `None`, UTC ISO `generated_at`)
-7. Create `src/data_quality_mcp/tools/profiling_tools.py`:
-   - `profile_dataset(file_path: str) -> dict` — a thin wrapper: calls `loader.load_data`, then `report.generate_report`, returns the dict
-   - Catches domain exceptions and turns them into clear MCP tool errors
-   - `register(app: MCPServer) -> None` registers the tool on the app passed in
-   - Write a deliberately clear, complete docstring — this is what an agent will read to decide when and how to call the tool
-8. Create `src/data_quality_mcp/server.py`:
-   - Instantiate the `MCPServer` app (v2 name for v1's FastMCP)
-   - Call `profiling_tools.register(app)`
-   - `main()` entry point (wired to the console script and `if __name__ == "__main__"`) that runs over stdio transport
-   - Logging configured to stderr only — no `print()` anywhere
-9. Create `examples/claude_desktop_config.json` with a working local stdio config (verify format per step 0; show the Windows absolute-path form)
-10. Create `scripts/generate_messy_data.py`: a synthetic ~500-row dataset with missing values, mixed types, and a couple of outliers — save to `tests/fixtures/messy_sample.csv` and `examples/sample_datasets/messy_data.csv`. Use a fixed random seed so the fixture is reproducible.
-11. Create `Makefile` (or the Windows-friendly alternative chosen in step 0) with: `install`, `run`, `dev` (Inspector), `lint`, `test`
-12. Write tests against the messy fixture:
-    - `tests/test_architecture.py` — fails if `profiler_core/`, `cleaner_core/`, or `config.py` import `mcp`
-    - `tests/test_loader.py` — both/neither inputs, unsupported format, size and row limits, CSV and XLSX
-    - `tests/test_profiler_core.py` — types, stats, missing values, schema shape, `json.dumps(report, allow_nan=False)` succeeds
-    - `tests/test_tools.py` — via the SDK's in-memory client: `profile_dataset` is listed, returns a schema-matching report, and a bad path produces a clean tool error
-13. Write a short `docs/architecture.md`: the layer boundary, the `register(app)` pattern, the error-handling rule, and the quality score formula
-14. Verify end-to-end: run the server via the MCP Inspector (or connect it to Claude Desktop using the example config) and confirm `profile_dataset` is discoverable and returns a correct, schema-matching report on the messy sample dataset
-15. Add CI (see Key Design Decisions → PR-Gated Workflow and CI): the six workflows under `.github/workflows/` plus `.github/dependabot.yml`. In step 0, check the current versions and inputs of each action (especially `anthropics/claude-code-action` and its OAuth-token auth) instead of relying on memory.
-16. Do all of Milestone 1 on a branch (e.g. `feat/milestone-1`) and open a PR. This is the first PR the new workflows run on. Merge only once every check is green. After the merge, set up the branch ruleset on `main` in GitHub settings.
-
-**PR title / squash commit message:** `feat: MCP server scaffolding with core profiling and profile_dataset tool`
