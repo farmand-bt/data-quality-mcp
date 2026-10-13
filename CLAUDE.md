@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Data Quality MCP Server: an MCP server that exposes deterministic dataset profiling and cleaning as tools for any MCP client. The full plan and milestone roadmap are in `data-quality-mcp-server-overview.md`. Read it before starting a milestone.
+Data Quality MCP Server: an MCP server that exposes deterministic dataset profiling and cleaning as tools for any MCP client. Planning lives in `planning/`: `project-overview.md` (architecture, roadmap, design decisions, report schema) and one spec per milestone (`milestone-N.md`). Read the overview and the current milestone's spec before starting work on it.
 
 ## Invariants (apply to every milestone)
 
@@ -18,7 +18,7 @@ Data Quality MCP Server: an MCP server that exposes deterministic dataset profil
 - The report contract lives in `profiler_core/schema.py` (TypedDicts from `typing_extensions`, which Pydantic requires on Python < 3.12).
 - Tool output must be JSON-safe (use `profiler_core/json_safe.to_json_safe`): only native Python types, `NaN`/`NaT` become `None`, timestamps are UTC ISO 8601 strings.
 - Fields that haven't been computed yet are present and set to `null`, never omitted and never zero-filled (`0` means "checked, none found").
-- Follow the report schema in the overview doc exactly. Change it only with explicit approval.
+- Follow the report schema in `planning/project-overview.md` exactly. Change it only with explicit approval, which is given by merging a milestone spec that proposes the change.
 
 ### stdio hygiene
 - No `print()` anywhere in `src/`. Over stdio, stdout is the JSON-RPC channel. Log to stderr with the `logging` module.
@@ -36,9 +36,10 @@ Data Quality MCP Server: an MCP server that exposes deterministic dataset profil
 
 ## Working conventions
 - Platform: Windows 11 (PowerShell, and Git Bash is available). Commands and client configs must work on Windows. Client configs use absolute paths to the venv interpreter or `uv`.
+- Consistency with `llm-data-quality-analyzer` (sibling repo): port its profiling and cleaning behaviour unchanged. Deviate only for MCP-specific constraints or this repo's invariants, and list every deviation in the milestone spec.
 - MCP tooling changes fast. Check SDK APIs, Inspector commands, and client config formats against current docs instead of relying on memory.
 - Tooling: `uv` + GNU `make`. Before committing: `make format` then `make test` (`make lint` is what CI runs).
 - Code must work on both pandas 2 (Python 3.10) and pandas 3 (Python 3.11+); for example, string columns are dtype `object` on pandas 2 and `str` on pandas 3. CI tests both.
 - Commit messages and PR titles follow Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`, `ci:`). Use `docs:`, not `doc:`, because commitlint rejects `doc:`.
-- Every change goes through a PR: create a branch, open a PR, wait for the CI checks to pass, then squash-merge. Never push directly to `main`. The PR title becomes the squash commit message, so it must pass commitlint.
-- Use plan mode at the start of each milestone. The plan should state how the milestone respects the layer boundary.
+- Every change goes through a PR: create a branch, open a PR, wait for the CI checks to pass, then squash-merge. Claude never pushes directly to `main`. The `main protection` ruleset enforces this; only the repo owner can bypass it, and that's for the owner's own deliberate use. If CI job names or the test matrix change, the ruleset's required-check list must be updated too. The PR title becomes the squash commit message, so it must pass commitlint.
+- Each milestone starts with a spec PR (`planning/milestone-N.md`), reviewed and merged before any implementation. A spec that changes the report schema must say so in a dedicated **Schema changes** section, so reviewers know to check it. Then use plan mode to plan the implementation. The plan should state how the milestone respects the layer boundary.

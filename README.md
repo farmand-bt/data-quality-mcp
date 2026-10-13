@@ -4,7 +4,7 @@ An MCP server that exposes the core logic of the Data Quality Analyzer project a
 
 Instead of a person uploading a CSV to a dashboard, an agent calls `profile_dataset` as part of its own workflow and gets back a structured, schema-validated quality report. The server makes **no LLM calls**: it is deterministic tooling, and the reasoning happens in whichever agent calls it.
 
-> **Status:** Milestone 1 of 5. Profiling covers types, statistics, missing values and a quality score. Outliers, duplicates, correlations, cleaning tools and remote (HTTP) deployment come in later milestones. See [`data-quality-mcp-server-overview.md`](data-quality-mcp-server-overview.md).
+> **Status:** Milestone 1 of 5. Profiling covers types, statistics, missing values and a quality score. Outliers, duplicates, correlations, cleaning tools and remote (HTTP) deployment come in later milestones. See [`planning/project-overview.md`](planning/project-overview.md) and the per-milestone specs in [`planning/`](planning/).
 
 ## Tools
 
