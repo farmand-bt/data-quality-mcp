@@ -9,19 +9,33 @@
 
 ---
 
+## Guiding principle: consistent with the Data Quality Analyzer
+
+The analysis is **ported from `llm-data-quality-analyzer` with the same behaviour** (`profiler/outliers.py`, `duplicates.py`, `correlations.py`, `recommendations.py`): same methods, thresholds, fields, recommendation rules and score components. Both projects should give the same answers on the same data. A deviation is allowed only when the analyzer's behaviour conflicts with an MCP-specific constraint (result size, no server-side state, an agent as the reader) or with one of this repo's invariants. Every deviation is listed below, so nothing differs silently.
+
 ## Decisions to confirm in review
 
-Each decision has a recommendation, which this spec assumes. Change any of them in review and the spec gets updated before merge.
+| # | Decision | Recommendation |
+|---|---|---|
+| D1 | Do duplicates and outliers count in the quality score? | **Yes, as in the analyzer.** The formula already has slots for them. The messy sample drops from 84 (B) to **76 (C)**, and the docs will say scores dropped. |
+| D2 | What drives the outlier penalty? | **The analyzer's formula:** the average IQR outlier % across numeric columns that have any outliers, × 2, capped at 10. Messy sample: (2.88% + 1.35%) / 2 = 2.12%, so a penalty of 4.2. |
+| D3 | Which z-score? | **The analyzer's classic z-score** (\|x − mean\| / std > 3.0). Known limitation, documented in the docs and the tool docstring: extreme values inflate the std and can hide other outliers. On the messy sample, z flags 2 price outliers while IQR flags 15. IQR is the primary method and the only one used in the score and recommendations, as in the analyzer. |
+| D4 | Large row-index lists | **Cap every index list at 50**, the analyzer's existing cap for duplicate samples, applied to outlier lists too, with `indices_truncated` set when a list is cut. Counts and percentages stay exact. The analyzer keeps full outlier lists because its cleaner consumes them from the report. Here an agent reads the report, so a 500k-row file must not produce a multi-MB tool result. M3's cleaning tools will recompute indices server-side with the same core function (on the same loaded data, so no drift) instead of taking them from the agent. |
+| D5 | Which resource(s)? *(MCP-only, no analyzer equivalent)* | **Stateless resources:** `dataquality://schema/report` (the report's JSON Schema) and `dataquality://docs/quality-score` (how the score and grade are computed). A `report://last` cache would be server-side state, which would leak one caller's data to another once several HTTP clients connect in M4. |
+| D6 | Near-duplicates | **As in the analyzer:** rows identical on every column but one, skipped above 50 columns, reported but not scored. |
+| D7 | Tool surface *(MCP-only)* | **Keep `profile_dataset` as the full report and add three focused tools** returning only their section: `detect_outliers`, `find_duplicates`, `analyze_correlations`. Recommendations come only with the full report, because they need every section. |
 
-| # | Decision | Recommendation | Alternative |
+## Deviations from the analyzer
+
+| Area | Analyzer | Here | Why |
 |---|---|---|---|
-| D1 | Do duplicates and outliers count against the quality score from this milestone on? | **Yes.** The formula already has slots for them (see `docs/architecture.md`). The messy sample drops from 84 (B) to **72 (C)**. Release notes and the docs will say scores dropped. | Report them but keep the score M1-only until M5 |
-| D2 | What drives the outlier penalty? | **% of rows with at least one IQR outlier in any numeric column**, × 2, capped at 10. Easy to explain ("4% of rows contain an outlier") and not skewed by which columns happen to have outliers. Messy sample: 22 of 520 rows (4.23%), penalty 8.5. | The analyzer's "average IQR % over columns that have outliers" (penalty 4.2 on the messy sample, so it would score 76). One stray outlier in one column scores as badly as heavy outliers everywhere. |
-| D3 | Which z-score? | **Robust (modified) z-score:** 0.6745 × (x − median) / MAD, flagged above **3.5** (Iglewicz & Hoaglin). The classic mean/std z-score *masks* extreme values: on the messy sample it finds only 2 of the 10 injected price outliers, because the 9,999,999 values inflate the std. The robust z-score finds exactly those 10. The JSON field names stay `zscore_*`; the docs and tool docstring say it's the robust variant. `OUTLIER_ZSCORE_THRESHOLD` changes from 3.0 to 3.5. Falls back to classic z when MAD = 0. | Classic z-score at 3.0, as in the analyzer |
-| D4 | Large row-index lists | **Cap each index list at 100** (`MAX_REPORTED_INDICES` in config). Counts and percentages stay exact, and `indices_truncated: true` says when a list was cut. A 500k-row file must not produce a multi-MB tool result. | Uncapped lists |
-| D5 | Which resource(s)? | **Stateless resources:** `dataquality://schema/report` (the report's JSON Schema) and `dataquality://docs/quality-score` (how the score and grade are computed, as Markdown). They help an agent interpret results, and they behave the same over stdio and HTTP. | A `report://last` resource caching the most recent report. That's server-side state: harmless over stdio, but with several HTTP clients (M4) it leaks one caller's data to another, so it would need per-session storage. Deferred. |
-| D6 | Near-duplicates | **Include** rows identical on every column but one (skipped above 50 columns, as in the analyzer). Reported only, not part of the score: they're often legitimate. | Exact duplicates only |
-| D7 | Tool surface | **Keep `profile_dataset` as the full report, and add three focused tools** returning only their own section: `detect_outliers`, `find_duplicates`, `analyze_correlations`. An agent with a narrow question gets a small, targeted result. Recommendations come only with the full report, because they need every section. | Only `profile_dataset` |
+| Non-numeric columns' `outliers` | zero counts and empty lists | `null` | Invariant: `0` means "checked, none found". Outlier detection doesn't apply to these columns. |
+| Index lists | outlier lists uncapped; duplicate samples capped at 50 | every list capped at 50, plus `indices_truncated` | Tool result size (D4) |
+| Pearson / Cramér's V | all numeric columns; first 15 categorical columns | at most 50 numeric columns; first 15 categorical columns with at most 50 distinct values each | Bounded result size and runtime on wide or high-cardinality data |
+| IQR bounds | not reported (the cleaner recomputes them) | `iqr_lower_bound` / `iqr_upper_bound` per column | Lets an agent explain *why* a value is an outlier. Additive only. |
+| Recommendation categories | missing, type, duplicate, outlier, correlation | the same, plus `consistency` | M1 reports inconsistent category labels as a warning instead of a type mismatch, so they need their own category |
+| Score | includes the +5 clean-column bonus | no bonus | Already decided and approved in M1 (it partly cancels out real problems) |
+| `distribution` section, MCAR/MAR missing patterns | present | not ported | Not in the report schema. A candidate for a later milestone, ported as-is. |
 
 ---
 
@@ -38,7 +52,7 @@ Example values below are the real results for the `price` column and the duplica
     "iqr_count": 15, "iqr_pct": 2.88,
     "iqr_lower_bound": 147204.5, "iqr_upper_bound": 546016.5,
     "iqr_indices": [3, 41, ...],
-    "zscore_count": 10, "zscore_pct": 1.92,      # robust (modified) z-score, see D3
+    "zscore_count": 2, "zscore_pct": 0.38,       # classic z-score; see D3 for its masking limitation
     "zscore_indices": [3, 41, ...],
     "indices_truncated": False,                  # True if any list above hit MAX_REPORTED_INDICES
 }
@@ -68,7 +82,7 @@ Example values below are the real results for the `price` column and the duplica
 }
 ```
 
-Limits: Pearson uses at most 50 numeric columns, and Cramér's V at most 15 categorical columns, each with at most 50 distinct values. Columns beyond the limits are skipped, and the docstring says so.
+Limits (see Deviations): Pearson uses at most 50 numeric columns, and Cramér's V at most 15 categorical columns, each with at most 50 distinct values. Columns beyond the limits are skipped, and the docstring says so.
 
 **`recommendations`** (`list[Recommendation]`), sorted critical → warning → info:
 
@@ -83,16 +97,16 @@ The rules are ported from the analyzer's `recommendations.py`, plus `consistency
 
 **Per-column `warnings`:** add an outlier warning when a column's IQR outlier share is above 5%, as in the analyzer.
 
-## Quality score (with D1 + D2)
+## Quality score (D1 + D2, same components as the analyzer)
 
 | Component | Penalty | Cap |
 |---|---|---|
 | Completeness | 2 × overall missing-cell % | 40 |
 | Type consistency | 20 × mismatched columns / all columns | 20 |
 | Duplicates | 1 × exact-duplicate-row % | 10 |
-| Outliers | 2 × % of rows with ≥ 1 IQR outlier | 10 |
+| Outliers | 2 × average IQR outlier % across numeric columns that have outliers | 10 |
 
-`compute_quality_score()` already takes `duplicate_pct` and `outlier_pct`. Only the inputs change (`outlier_pct` is now row-based), and `docs/architecture.md` is updated to match.
+`compute_quality_score()` already takes `duplicate_pct` and `outlier_pct`, so M2 only supplies them. `docs/architecture.md` is updated to match.
 
 ---
 
@@ -103,8 +117,8 @@ The rules are ported from the analyzer's `recommendations.py`, plus `consistency
    - The `resource_security` defaults (they only matter for templated URIs; D5 uses static ones)
    - The `mime_type` handling for JSON and Markdown resources
    - `Client.list_resources` / `read_resource` / `list_prompts` / `get_prompt`, for the tests
-1. **Config:** add `MAX_REPORTED_INDICES = 100`, `MAX_CORRELATION_NUMERIC_COLUMNS = 50`, `MAX_CRAMERS_V_COLUMNS = 15`, `MAX_CRAMERS_V_CARDINALITY = 50`, `MAX_NEAR_DUPLICATE_COLUMNS = 50`, `OUTLIER_COLUMN_WARNING_PCT = 5.0`. Change `OUTLIER_ZSCORE_THRESHOLD` to 3.5 (D3).
-2. **`profiler_core/outliers.py`:** `detect_outliers(df, type_info, *, iqr_multiplier, zscore_threshold, max_indices) -> dict[str, OutlierInfo | None]`, plus a row-level helper returning the % of rows with any IQR outlier (for D2). Port from the analyzer, with the robust z-score (D3) and capped indices (D4).
+1. **Config:** add `MAX_REPORTED_INDICES = 50`, `MAX_CORRELATION_NUMERIC_COLUMNS = 50`, `MAX_CRAMERS_V_COLUMNS = 15`, `MAX_CRAMERS_V_CARDINALITY = 50`, `MAX_NEAR_DUPLICATE_COLUMNS = 50`, `OUTLIER_COLUMN_WARNING_PCT = 5.0`. The existing `OUTLIER_IQR_MULTIPLIER` (1.5), `OUTLIER_ZSCORE_THRESHOLD` (3.0) and `HIGH_CORRELATION_THRESHOLD` (0.9) already match the analyzer.
+2. **`profiler_core/outliers.py`:** `detect_outliers(df, type_info, *, iqr_multiplier, zscore_threshold, max_indices) -> dict[str, OutlierInfo | None]`. Port from the analyzer with the same methods (D2, D3), plus `null` for non-applicable columns, IQR bounds and capped indices (D4).
 3. **`profiler_core/duplicates.py`:** `analyze_duplicates(df, *, max_indices, max_near_duplicate_columns) -> DuplicateInfo`. Port, including near-duplicates (D6).
 4. **`profiler_core/correlations.py`:** `compute_correlations(df, type_info, *, threshold, ...) -> CorrelationInfo`. Port Pearson and Cramér's V (scipy `chi2_contingency`), with the column and cardinality limits.
 5. **`profiler_core/recommendations.py`:** `generate_recommendations(report, *, missing_threshold) -> list[Recommendation]`. Port the rules, add `consistency`, and sort by severity.
@@ -119,8 +133,9 @@ The rules are ported from the analyzer's `recommendations.py`, plus `consistency
 10. **`server.py`:** register the new modules and update `INSTRUCTIONS` to mention the focused tools, resources and prompt.
 11. **Fixtures:** keep `messy_sample.csv` unchanged so the M1 expectations stay valid. If correlation tests need a strongly correlated pair, add a small separate fixture (for example `tests/fixtures/correlated_sample.csv`) via the generator script.
 12. **Tests:**
-    - Unit tests per new core module, including edge cases: constant column (IQR = 0 and MAD = 0), fewer than 4 values, all-NaN column, single-category column, more columns than the limits, index caps with `indices_truncated`.
-    - Fixture expectations: 19 exact and 2 near duplicates; 15 IQR and 10 robust-z outliers in `price`; 22 rows (4.23%) with an IQR outlier; score 72 (C).
+    - Unit tests per new core module, including edge cases: constant column (IQR = 0 and std = 0), fewer than 4 values, all-NaN column, single-category column, more columns than the limits, index caps with `indices_truncated`.
+    - Fixture expectations: 19 exact and 2 near duplicates; `price` has 15 IQR outliers (2.88%) and 2 z-score outliers; `sqft` has 7 IQR outliers; score 76 (C).
+    - **Parity tests with the analyzer:** port the analyzer's own outlier, duplicate, correlation and recommendation test cases (`tests/test_profiler.py`), adapted only where a listed deviation applies. That keeps both projects giving the same answers.
     - Score and grade on the messy sample under the new formula.
     - `json.dumps(report, allow_nan=False)` still passes.
     - `test_tools.py`: the new tools are listed with output schemas and return only their section; `list_resources` and `read_resource` work for both URIs, and the schema resource parses as JSON Schema; `list_prompts` and `get_prompt` work; bad paths give actionable errors for every tool.
