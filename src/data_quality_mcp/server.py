@@ -13,23 +13,29 @@ import sys
 from mcp.server import MCPServer
 
 from data_quality_mcp import __version__
-from data_quality_mcp.tools import profiling_tools
+from data_quality_mcp.tools import profiling_tools, prompts, resources
 
 SERVER_NAME = "data-quality"
 
 INSTRUCTIONS = (
-    "Deterministic data quality profiling for CSV and Excel files. Call "
-    "profile_dataset with an absolute file path to get a structured report: "
-    "quality score and grade, per-column inferred types, type mismatches, "
-    "missing values, statistics, and plain-language warnings. Fields that are "
-    "null have not been computed by this server version."
+    "Deterministic data quality profiling for CSV and Excel files (read-only; "
+    "always pass absolute file paths). profile_dataset returns the full report: "
+    "quality score and grade, prioritized recommendations, and per-column types, "
+    "type mismatches, missing values, statistics, outliers and warnings, plus "
+    "duplicate rows and correlations. For a narrow question use detect_outliers, "
+    "find_duplicates or analyze_correlations. The resource "
+    "dataquality://docs/quality-score explains the score, and "
+    "dataquality://schema/report is the report's JSON Schema. The "
+    "review_data_quality prompt runs a complete review."
 )
 
 
 def create_server() -> MCPServer:
-    """Build the app and register all tools on it."""
+    """Build the app and register every tools module on it."""
     app = MCPServer(SERVER_NAME, version=__version__, instructions=INSTRUCTIONS)
     profiling_tools.register(app)
+    resources.register(app)
+    prompts.register(app)
     return app
 
 
