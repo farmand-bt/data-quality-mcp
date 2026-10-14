@@ -6,6 +6,7 @@ native Python type, and non-finite floats become None.
 
 import math
 
+import numpy as np
 import pandas as pd
 
 from data_quality_mcp.profiler_core.type_detector import parse_datetimes
@@ -104,7 +105,10 @@ def compute_column_stats(series: pd.Series, inferred_type: str) -> dict:
     """Statistics for one column, computed over its non-null values."""
     non_null = series.dropna()
     if inferred_type in ("numeric", "mixed"):
-        return _numeric_stats(non_null)
+        # Infinite values make moments non-finite (reported as None by
+        # _finite); silence numpy's per-reduction warnings about it.
+        with np.errstate(invalid="ignore", over="ignore"):
+            return _numeric_stats(non_null)
     if inferred_type in ("categorical", "boolean"):
         return _categorical_stats(non_null)
     if inferred_type == "datetime":

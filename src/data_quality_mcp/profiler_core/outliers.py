@@ -6,6 +6,7 @@ non-applicable columns are None instead of zero counts, IQR fences are
 reported, and index lists are sorted and capped.
 """
 
+import numpy as np
 import pandas as pd
 
 from data_quality_mcp import config
@@ -45,12 +46,16 @@ def detect_column_outliers(
         upper = q3 + iqr_multiplier * iqr
         iqr_mask = values.notna() & ((values < lower) | (values > upper))
 
-    mean = float(valid.mean())
-    std = float(valid.std())
-    if std == 0:
-        z_mask = pd.Series(False, index=values.index)
-    else:
-        z_mask = values.notna() & (((values - mean) / std).abs() > zscore_threshold)
+    # Infinite values make mean/std non-finite; numpy then warns on every
+    # reduction. The result (no z-score flags) is correct, so silence the noise.
+    with np.errstate(invalid="ignore", over="ignore"):
+        mean = float(valid.mean())
+        std = float(valid.std())
+        if std == 0:
+            z_mask = pd.Series(False, index=values.index)
+        else:
+            z_scores = ((values - mean) / std).abs()
+            z_mask = values.notna() & (z_scores > zscore_threshold)
 
     iqr_count = int(iqr_mask.sum())
     z_count = int(z_mask.sum())

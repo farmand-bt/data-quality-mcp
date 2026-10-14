@@ -348,3 +348,38 @@ def test_to_json_safe_converts_numpy_and_pandas_values():
         "other": "x",
     }
     json.dumps(converted, allow_nan=False)
+
+
+# --- robustness (from the PR #6 review) ---
+
+
+def test_infinite_values_are_flagged_and_json_safe():
+    df = pd.DataFrame(
+        {"a": [float(i) for i in range(1, 20)] + [np.inf, -np.inf], "b": range(21)}
+    )
+    report = generate_report(df, "inf.csv", "file_path")
+    json.dumps(report, allow_nan=False)
+    outliers = report["columns"]["a"]["outliers"]
+    assert outliers["iqr_count"] == 2  # +inf and -inf fall outside the fences
+    assert sorted(outliers["iqr_indices"]) == [19, 20]
+    assert report["columns"]["a"]["stats"]["mean"] is None  # not inf
+
+
+def test_indices_are_row_positions_for_any_input_index():
+    df = pd.DataFrame(
+        {"x": list(range(1, 21)) + [1000.0], "y": range(21)}, index=range(100, 121)
+    )
+    df = pd.concat([df, df.iloc[[0]]])  # duplicate of the first row, label 100
+    report = generate_report(df, "t.csv", "file_path")
+    assert report["columns"]["x"]["outliers"]["iqr_indices"] == [20]
+    assert report["duplicates"]["sample_indices"] == [0, 21]
+
+
+def test_zero_row_frame_does_not_crash():
+    df = pd.DataFrame(
+        {"a": pd.Series([], dtype=float), "b": pd.Series([], dtype=object)}
+    )
+    report = generate_report(df, "empty.csv", "file_path")
+    json.dumps(report, allow_nan=False)
+    assert report["columns"]["a"]["outliers"] is None
+    assert report["duplicates"]["exact_count"] == 0

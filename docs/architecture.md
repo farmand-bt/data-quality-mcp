@@ -88,7 +88,7 @@ The analyzer's "+5 clean-column bonus" was dropped in Milestone 1, because it co
   - **Classic z-score (secondary):** `|x − mean| / std > 3`. Extreme values inflate the std and can mask other outliers. On the messy sample, z flags 2 price outliers where IQR flags 15. It is kept for parity with the analyzer, and the tool docstrings tell agents to prefer IQR.
 - **Duplicates:**
   - exact duplicates: `exact_count` is how many rows deduplication would remove
-  - near-duplicates: rows identical on all columns but one, excluding exact duplicates, skipped above 50 columns. They're reported but not scored.
+  - near-duplicates: rows identical on all columns but one, excluding exact duplicates, skipped above 50 columns. They're reported but not scored. This is the most expensive step: one full pass per column, about 25 s of the roughly 29 s full report at the limits (500k rows × 50 columns). The column limit is the analyzer's own, kept for parity.
 - **Correlations:** Pearson over the first 50 numeric columns, and Cramér's V (`scipy` χ², no bias correction) over the first 15 categorical/boolean columns with at most 50 distinct values. Pairs with |value| ≥ 0.9 are listed strongest first.
 
 ## MCP surface
