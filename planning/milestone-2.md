@@ -1,6 +1,6 @@
 # Milestone 2: Expanded Tool Surface
 
-> **Status: draft for review.** Merging this spec approves its decisions and the schema changes in it; implementation starts afterwards in plan mode.
+> **Status: complete.** The spec was approved in PR #5 and implemented on `feat/milestone-2`. See **As built** at the end for figures and small differences.
 > Shared context (architecture, report schema, design decisions) is in [project-overview.md](project-overview.md). Milestone 1 is in [milestone-1.md](milestone-1.md).
 
 **Goal:** Fill in the report sections Milestone 1 left `null` (outliers, duplicates, correlations, recommendations), make them part of the quality score, and use the rest of the MCP surface: focused tools, resources, and a prompt.
@@ -17,7 +17,7 @@ The analysis is **ported from `llm-data-quality-analyzer` with the same behaviou
 
 | # | Decision | Recommendation |
 |---|---|---|
-| D1 | Do duplicates and outliers count in the quality score? | **Yes, as in the analyzer.** The formula already has slots for them. The messy sample drops from 84 (B) to **76 (C)**, and the docs will say scores dropped. |
+| D1 | Do duplicates and outliers count in the quality score? | **Yes, as in the analyzer.** The formula already has slots for them. The messy sample drops from 84 (B) to **77 (C)** (corrected from 76, see As built), and the docs say scores dropped. |
 | D2 | What drives the outlier penalty? | **The analyzer's formula:** the average IQR outlier % across numeric columns that have any outliers, × 2, capped at 10. Messy sample: (2.88% + 1.35%) / 2 = 2.12%, so a penalty of 4.2. |
 | D3 | Which z-score? | **The analyzer's classic z-score** (\|x − mean\| / std > 3.0). Known limitation, documented in the docs and the tool docstring: extreme values inflate the std and can hide other outliers. On the messy sample, z flags 2 price outliers while IQR flags 15. IQR is the primary method and the only one used in the score and recommendations, as in the analyzer. |
 | D4 | Large row-index lists | **Cap every index list at 50**, the analyzer's existing cap for duplicate samples, applied to outlier lists too, with `indices_truncated` set when a list is cut. Counts and percentages stay exact. The analyzer keeps full outlier lists because its cleaner consumes them from the report. Here an agent reads the report, so a 500k-row file must not produce a multi-MB tool result. M3's cleaning tools will recompute indices server-side with the same core function (on the same loaded data, so no drift) instead of taking them from the agent. |
@@ -134,7 +134,7 @@ The rules are ported from the analyzer's `recommendations.py`, plus `consistency
 11. **Fixtures:** keep `messy_sample.csv` unchanged so the M1 expectations stay valid. If correlation tests need a strongly correlated pair, add a small separate fixture (for example `tests/fixtures/correlated_sample.csv`) via the generator script.
 12. **Tests:**
     - Unit tests per new core module, including edge cases: constant column (IQR = 0 and std = 0), fewer than 4 values, all-NaN column, single-category column, more columns than the limits, index caps with `indices_truncated`.
-    - Fixture expectations: 19 exact and 2 near duplicates; `price` has 15 IQR outliers (2.88%) and 2 z-score outliers; `sqft` has 7 IQR outliers; score 76 (C).
+    - Fixture expectations: 19 exact and 2 near duplicates; `price` has 15 IQR outliers (2.88%) and 2 z-score outliers; `sqft` has 7 IQR outliers; score 77 (C).
     - **Parity tests with the analyzer:** port the analyzer's own outlier, duplicate, correlation and recommendation test cases (`tests/test_profiler.py`), adapted only where a listed deviation applies. That keeps both projects giving the same answers.
     - Score and grade on the messy sample under the new formula.
     - `json.dumps(report, allow_nan=False)` still passes.
@@ -152,3 +152,17 @@ The rules are ported from the analyzer's `recommendations.py`, plus `consistency
 **CI / ruleset:** no new workflows or job names, so the ruleset's required checks don't change.
 
 **PR title / squash commit message:** `feat: outlier, duplicate and correlation analysis with recommendations, resources and prompt`
+
+---
+
+## As built
+
+- **Score correction:** the messy sample scores **77 (C)**, not the 76 this spec first stated. The unrounded score is 76.58: 100 − 9.54 (missing) − 6 (types) − 3.65 (duplicates) − 4.23 (outliers). The draft wrongly subtracted the new penalties from the already-rounded Milestone 1 score of 84 instead of the raw 84.46. The formula is exactly as specified.
+- **Ordering-only deviation:** duplicate and near-duplicate index samples are sorted; the analyzer takes them in set order. Same rows, deterministic order.
+- **Cramér's V shape:** as in the analyzer, every included categorical column gets an entry in `cramers_v`, so the last one maps to `{}` (upper triangle).
+- **Module layout:** the score formula moved to `profiler_core/scoring.py`, together with the generated explanation served as `dataquality://docs/quality-score`.
+- **Recommendations** take the inconsistent-label columns as an argument (`inconsistent_columns`) instead of re-detecting them.
+- **Tests:** the analyzer's outlier, duplicate, correlation and recommendation cases are ported into `TestAnalyzerParity` classes (one file per module). 180 tests pass on Python 3.12/pandas 3 and Python 3.10/pandas 2, with 97% coverage.
+- **Performance:** a synthetic 500k × 10 dataset produces the full report in about 15 s, and the report is about 10 KB thanks to the index caps.
+- **Version:** 0.2.0.
+

@@ -50,8 +50,8 @@ An MCP (Model Context Protocol) server that exposes the core logic of the Data Q
 │                                                                 │
 │   ┌───────────────┐   ┌────────────────┐   ┌─────────────────┐ │
 │   │    Tools      │   │   Resources    │   │     Prompts     │ │
-│   │ profile_...   │   │  report://...  │   │ summarize-...   │ │
-│   │ detect_...    │   │  (last report) │   │                 │ │
+│   │ profile_...   │   │ dataquality:// │   │ review_data_... │ │
+│   │ detect_...    │   │ (schema, docs) │   │                 │ │
 │   │ clean_...     │   └────────────────┘   └─────────────────┘ │
 │   └───────┬───────┘                                             │
 │           │  thin adapter layer (parses args, calls core,       │
@@ -160,7 +160,7 @@ This project is built across 5 milestones — deliberately fewer and lighter tha
 | Milestone | Focus                                | What it adds                                                                 |
 |-----------|---------------------------------------|-------------------------------------------------------------------------------|
 | **1** ✅  | **Scaffolding + Core Profiling** ([spec](milestone-1.md)) | Repo setup, `profiler_core` (types/stats/missing), first tool (`profile_dataset`) over stdio |
-| **2**     | **Expanded Tool Surface** ([spec](milestone-2.md)) | Outliers, duplicates, correlations, recommendations tools; a resource; a prompt |
+| **2** ✅  | **Expanded Tool Surface** ([spec](milestone-2.md)) | Outliers, duplicates, correlations, recommendations tools; a resource; a prompt |
 | **3**     | **Flexible Input + Cleaning Tools**   | Inline data support (not just file paths), cleaning tools ported from the cleaner engine |
 | **4**     | **Remote Deployment**                 | Streamable HTTP transport, Docker, minimal auth, a live deployment            |
 | **5**     | **Polish & Docs**                     | README with connection guides, full test pass, optional MCP registry listing  |
@@ -177,7 +177,7 @@ This project is built across 5 milestones — deliberately fewer and lighter tha
 ## Key Design Decisions
 
 ### Tool Output Schema
-Every profiling tool returns JSON matching this shape. Fields not yet computed are **present but `null`**, never missing and never zero-filled — an agent reads `0` as "checked, none found", which would be a false claim. In Milestone 1 that means `outliers`, `duplicates`, and `correlations` are `null`, and `recommendations` is `[]`. The example below shows the shape once everything is computed (Milestone 2+):
+`profile_dataset` returns JSON matching this shape. Since Milestone 2 every section is computed. A column's `outliers` is `null` only when detection doesn't apply (non-numeric columns, or fewer than 4 numeric values); an agent reads `0` as "checked, none found", so `null` is never used for that. Row indices are 0-based data-row positions (CSV line = index + 2), and every index list is capped at 50, with `indices_truncated`. The focused tools (`detect_outliers`, `find_duplicates`, `analyze_correlations`) return `{"dataset": {name, source, rows, columns}, "<section>": ...}` using the same section shapes. The authoritative definition is `src/data_quality_mcp/profiler_core/schema.py`, also served as the resource `dataquality://schema/report`.
 
 ```python
 {
@@ -192,18 +192,35 @@ Every profiling tool returns JSON matching this shape. Fields not yet computed a
     "columns": {
         "<column_name>": {
             "pandas_dtype": "object",
-            "inferred_type": "categorical",  # numeric, categorical, datetime, boolean, text, mixed
+            "inferred_type": "numeric",      # numeric, categorical, datetime, boolean, text, mixed
             "type_mismatch": False,
             "missing_count": 12,
             "missing_pct": 1.2,
             "stats": { },              # contents vary by inferred_type
-            "outliers": {"iqr_count": 0, "zscore_count": 0, "iqr_indices": [], "zscore_indices": []},
+            "outliers": {              # null for non-numeric columns or < 4 values
+                "iqr_count": 15, "iqr_pct": 2.88,
+                "iqr_lower_bound": 147204.5, "iqr_upper_bound": 546016.5,
+                "iqr_indices": [3, 41],
+                "zscore_count": 2, "zscore_pct": 0.38, "zscore_indices": [41, 77],
+                "indices_truncated": False
+            },
             "warnings": []
         }
     },
-    "duplicates": {"exact_count": 0, "exact_pct": 0.0, "sample_indices": []},
-    "correlations": {"pearson": {}, "high_correlation_pairs": []},
-    "recommendations": [],
+    "duplicates": {
+        "exact_count": 19, "exact_pct": 3.65, "sample_indices": [5, 18],
+        "near_duplicate_count": 2, "near_duplicate_pct": 0.38, "near_sample_indices": [7, 90],
+        "indices_truncated": False
+    },
+    "correlations": {
+        "pearson": {"a": {"a": 1.0, "b": 0.97}},
+        "cramers_v": {"c": {"d": 0.12}},
+        "high_correlation_pairs": [{"col_a": "a", "col_b": "b", "method": "pearson", "value": 0.97}]
+    },
+    "recommendations": [       # sorted critical -> warning -> info
+        {"severity": "warning", "category": "duplicate", "column": None,
+         "message": "19 exact duplicate rows detected (3.6%): consider deduplication ..."}
+    ],
     "generated_at": "2026-01-01T00:00:00Z"   # UTC, ISO 8601
 }
 ```
@@ -221,7 +238,7 @@ The core raises its own domain exceptions, defined in `profiler_core/exceptions.
 Over stdio, stdout *is* the JSON-RPC channel — any stray `print()` corrupts the protocol and breaks the client connection, often with no obvious error. No `print()` anywhere in the package; all logging goes to stderr through the `logging` module.
 
 ### Quality Score
-`quality_score` (0–100) and `quality_grade` must come from a deterministic, documented formula — not an ad-hoc one invented during implementation. In Milestone 1 only completeness (missing values) and type consistency (type mismatches) are available, so the formula should be a weighted-penalty model over those components, designed so later components (duplicates, outliers) can be added in Milestone 2 without changing its shape. The formula and weights were approved in Milestone 1 and are documented in [`docs/architecture.md`](../docs/architecture.md#quality-score-milestone-1-formula). Grades map from score via `QUALITY_GRADE_THRESHOLDS`.
+`quality_score` (0–100) and `quality_grade` must come from a deterministic, documented formula — not an ad-hoc one invented during implementation. In Milestone 1 only completeness (missing values) and type consistency (type mismatches) are available, so the formula should be a weighted-penalty model over those components, designed so later components (duplicates, outliers) can be added in Milestone 2 without changing its shape. The formula and weights were approved in Milestone 1, completed in Milestone 2, and are documented in [`docs/architecture.md`](../docs/architecture.md#quality-score) and served as `dataquality://docs/quality-score`. Grades map from score via `QUALITY_GRADE_THRESHOLDS`.
 
 ### Dual Input Mode
 Tools need to work both when the server runs locally over stdio (where reading a file path on disk is natural) and when it's deployed remotely over HTTP (where the server has no access to the caller's filesystem, so the caller must send the data itself). `loader.py` should accept `file_path: str | None` and `inline_content: str | None` (base64-encoded) from the start, even though the inline path isn't exercised by a real tool until Milestone 3.

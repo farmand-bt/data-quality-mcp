@@ -10,15 +10,20 @@ from data_quality_mcp.profiler_core.exceptions import InvalidInputError
 from data_quality_mcp.profiler_core.json_safe import to_json_safe
 from data_quality_mcp.profiler_core.loader import load_data
 from data_quality_mcp.profiler_core.missing import analyze_missing
-from data_quality_mcp.profiler_core.report import (
-    compute_quality_score,
-    generate_report,
-    quality_grade,
-)
+from data_quality_mcp.profiler_core.report import generate_report
 from data_quality_mcp.profiler_core.schema import (
     ColumnReport,
+    CorrelationInfo,
     DatasetInfo,
     DatasetReport,
+    DuplicateInfo,
+    OutlierInfo,
+    Recommendation,
+)
+from data_quality_mcp.profiler_core.scoring import (
+    compute_quality_score,
+    quality_grade,
+    quality_score_explanation,
 )
 from data_quality_mcp.profiler_core.stats import compute_column_stats
 from data_quality_mcp.profiler_core.type_detector import detect_types, infer_type
@@ -194,8 +199,14 @@ def _assert_typed_dict_keys(obj: dict, typed_dict: type) -> None:
 def test_report_matches_schema(messy_report: dict):
     _assert_typed_dict_keys(messy_report, DatasetReport)
     _assert_typed_dict_keys(messy_report["dataset"], DatasetInfo)
+    _assert_typed_dict_keys(messy_report["duplicates"], DuplicateInfo)
+    _assert_typed_dict_keys(messy_report["correlations"], CorrelationInfo)
     for column in messy_report["columns"].values():
         _assert_typed_dict_keys(column, ColumnReport)
+        if column["outliers"] is not None:
+            _assert_typed_dict_keys(column["outliers"], OutlierInfo)
+    for rec in messy_report["recommendations"]:
+        _assert_typed_dict_keys(rec, Recommendation)
 
 
 def test_report_dataset_section(messy_report: dict):
@@ -207,11 +218,43 @@ def test_report_dataset_section(messy_report: dict):
     assert dataset["quality_grade"] == quality_grade(dataset["quality_score"])
 
 
-def test_uncomputed_sections_are_null_not_zero(messy_report: dict):
-    assert messy_report["duplicates"] is None
-    assert messy_report["correlations"] is None
-    assert messy_report["recommendations"] == []
-    assert all(c["outliers"] is None for c in messy_report["columns"].values())
+def test_outliers_null_only_where_not_applicable(messy_report: dict):
+    columns = messy_report["columns"]
+    for name, column in columns.items():
+        applicable = column["inferred_type"] in ("numeric", "mixed")
+        assert (column["outliers"] is not None) == applicable, name
+
+
+def test_messy_fixture_parity(messy_report: dict):
+    """Figures reproduced from planning/milestone-2.md on messy_sample.csv."""
+    dataset, columns = messy_report["dataset"], messy_report["columns"]
+    duplicates = messy_report["duplicates"]
+    assert (duplicates["exact_count"], duplicates["exact_pct"]) == (19, 3.65)
+    assert duplicates["near_duplicate_count"] == 2
+    price = columns["price"]["outliers"]
+    assert (price["iqr_count"], price["iqr_pct"], price["zscore_count"]) == (
+        15,
+        2.88,
+        2,
+    )
+    assert (price["iqr_lower_bound"], price["iqr_upper_bound"]) == (147204.5, 546016.5)
+    assert columns["sqft"]["outliers"]["iqr_count"] == 7
+    assert messy_report["correlations"]["high_correlation_pairs"] == []
+    # 100 - 2 x 4.77 (missing) - 20 x 3/10 (types) - 3.65 (dups) - 2 x 2.115 = 76.58
+    assert (dataset["quality_score"], dataset["quality_grade"]) == (77, "C")
+
+
+def test_recommendations_sorted_by_severity(messy_report: dict):
+    order = {"critical": 0, "warning": 1, "info": 2}
+    ranks = [order[r["severity"]] for r in messy_report["recommendations"]]
+    assert ranks == sorted(ranks)
+    categories = {r["category"] for r in messy_report["recommendations"]}
+    assert {"duplicate", "type", "missing", "outlier"} <= categories
+
+
+def test_quality_score_explanation_uses_live_constants():
+    text = quality_score_explanation()
+    assert "40" in text and "A >= 90" in text and "IQR" in text
 
 
 def test_report_is_strict_json(messy_report: dict):
@@ -305,3 +348,38 @@ def test_to_json_safe_converts_numpy_and_pandas_values():
         "other": "x",
     }
     json.dumps(converted, allow_nan=False)
+
+
+# --- robustness (from the PR #6 review) ---
+
+
+def test_infinite_values_are_flagged_and_json_safe():
+    df = pd.DataFrame(
+        {"a": [float(i) for i in range(1, 20)] + [np.inf, -np.inf], "b": range(21)}
+    )
+    report = generate_report(df, "inf.csv", "file_path")
+    json.dumps(report, allow_nan=False)
+    outliers = report["columns"]["a"]["outliers"]
+    assert outliers["iqr_count"] == 2  # +inf and -inf fall outside the fences
+    assert sorted(outliers["iqr_indices"]) == [19, 20]
+    assert report["columns"]["a"]["stats"]["mean"] is None  # not inf
+
+
+def test_indices_are_row_positions_for_any_input_index():
+    df = pd.DataFrame(
+        {"x": list(range(1, 21)) + [1000.0], "y": range(21)}, index=range(100, 121)
+    )
+    df = pd.concat([df, df.iloc[[0]]])  # duplicate of the first row, label 100
+    report = generate_report(df, "t.csv", "file_path")
+    assert report["columns"]["x"]["outliers"]["iqr_indices"] == [20]
+    assert report["duplicates"]["sample_indices"] == [0, 21]
+
+
+def test_zero_row_frame_does_not_crash():
+    df = pd.DataFrame(
+        {"a": pd.Series([], dtype=float), "b": pd.Series([], dtype=object)}
+    )
+    report = generate_report(df, "empty.csv", "file_path")
+    json.dumps(report, allow_nan=False)
+    assert report["columns"]["a"]["outliers"] is None
+    assert report["duplicates"]["exact_count"] == 0
