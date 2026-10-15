@@ -146,3 +146,9 @@ def test_hashed_search_uses_duplicated_equality(a, b):
         {"v": pd.array([a, b], dtype=object), "w": [7, 7], "k": ["p", "q"]}
     )
     assert _near_duplicate_rows(df) == _naive_near_duplicates(df)
+
+
+def test_duplicate_column_names_are_handled_by_position():
+    # Two columns named "a": label-based selection would pick both at once
+    df = pd.DataFrame([[1, 2, 3], [1, 2, 4], [5, 6, 7]], columns=["a", "a", "b"])
+    assert _near_duplicate_rows(df) == {0, 1}  # differ only in column "b"

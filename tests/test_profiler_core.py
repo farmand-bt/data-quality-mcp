@@ -386,3 +386,14 @@ def test_zero_row_frame_does_not_crash():
     json.dumps(report, allow_nan=False)
     assert report["columns"]["a"]["outliers"] is None
     assert report["duplicates"]["exact_count"] == 0
+
+
+def test_column_of_only_infinite_values():
+    df = pd.DataFrame({"a": [np.inf, -np.inf, np.inf, np.inf, -np.inf], "b": range(5)})
+    report = generate_report(df, "inf.csv", "file_path")
+    json.dumps(report, allow_nan=False)
+    column = report["columns"]["a"]
+    assert column["outliers"] is None  # fewer than 4 finite values
+    assert (column["stats"]["count"], column["stats"]["infinite_count"]) == (0, 5)
+    assert column["stats"]["mean"] is None
+    assert any("5 infinite value(s)" in w for w in column["warnings"])

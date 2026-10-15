@@ -27,30 +27,35 @@ def _near_duplicate_rows(df: pd.DataFrame) -> set[int]:
     only deduplicates one uint64 array. Hash equality is only a filter: every
     candidate group is confirmed on the real values, so a hash collision can
     never add a false near-duplicate.
+
+    Columns and rows are addressed by position, so duplicate column names or a
+    non-unique index can't select the wrong data. Returns labels of `df.index`.
     """
+    n_rows, n_cols = df.shape
+    # One preallocated (n, k) array filled in place keeps the peak memory to a
+    # single uint64 matrix (about 200 MB at 500k rows x 50 columns).
+    # Array (not scalar) uint64 arithmetic wraps modulo 2**64 silently, which
+    # is intended; numpy only warns about overflow for scalar operations.
     mixers = (
-        np.arange(len(df.columns), dtype=np.uint64) * np.uint64(2) + np.uint64(1)
+        np.arange(n_cols, dtype=np.uint64) * np.uint64(2) + np.uint64(1)
     ) * _COLUMN_MIX
-    terms = (
-        np.column_stack(
-            [
-                pd.util.hash_pandas_object(df[col], index=False).to_numpy(np.uint64)
-                for col in df.columns
-            ]
-        )
-        * mixers
-    )  # uint64 arithmetic wraps modulo 2**64, which is intended
+    terms = np.empty((n_rows, n_cols), dtype=np.uint64)
+    for j in range(n_cols):
+        hashes = pd.util.hash_pandas_object(df.iloc[:, j], index=False)
+        np.multiply(hashes.to_numpy(np.uint64), mixers[j : j + 1], out=terms[:, j])
     total = terms.sum(axis=1, dtype=np.uint64)
 
     rows: set[int] = set()
-    for j, col in enumerate(df.columns):
-        candidates = pd.Series(total - terms[:, j]).duplicated(keep=False).to_numpy()
-        if not candidates.any():
+    for j in range(n_cols):
+        candidates = np.flatnonzero(
+            pd.Series(total - terms[:, j]).duplicated(keep=False).to_numpy()
+        )
+        if len(candidates) == 0:
             continue
-        others = [c for c in df.columns if c != col]
-        subset = df.loc[candidates, others]
-        confirmed = subset.duplicated(keep=False).to_numpy()
-        rows.update(int(i) for i in subset.index[confirmed])
+        others = [k for k in range(n_cols) if k != j]
+        subset = df.iloc[candidates, others]
+        confirmed = candidates[subset.duplicated(keep=False).to_numpy()]
+        rows.update(int(i) for i in df.index[confirmed])
     return rows
 
 
