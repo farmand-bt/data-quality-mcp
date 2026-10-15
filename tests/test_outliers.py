@@ -104,3 +104,36 @@ def test_score_pct_averages_columns_with_outliers():
     }
     assert outlier_score_pct(outliers) == 3.0
     assert outlier_score_pct({"d": None}) == 0.0
+
+
+# --- infinite values (deviation: computed on finite values, inf always flagged) ---
+
+
+def test_fences_ignore_infinite_values():
+    # 6 of 10 values are infinite: computed on all values, the quartiles (and
+    # so the fences) would be infinite. Here they come from the finite 1..4.
+    values = [1.0, 2.0, 3.0, 4.0] + [np.inf] * 3 + [-np.inf] * 3
+    result = detect_column_outliers(pd.Series(values), len(values))
+    assert result["iqr_lower_bound"] == -0.5
+    assert result["iqr_upper_bound"] == 5.5
+    assert result["iqr_indices"] == [4, 5, 6, 7, 8, 9]
+    assert result["zscore_indices"] == [4, 5, 6, 7, 8, 9]
+
+
+def test_infinite_values_flagged_even_when_iqr_is_zero():
+    values = [5.0] * 8 + [np.inf]
+    result = detect_column_outliers(pd.Series(values), len(values))
+    assert result["iqr_lower_bound"] is None
+    assert result["iqr_indices"] == [8]
+    assert result["zscore_indices"] == [8]
+
+
+def test_fewer_than_four_finite_values_is_none():
+    values = [1.0, 2.0, 3.0, np.inf, np.inf]
+    assert detect_column_outliers(pd.Series(values), len(values)) is None
+
+
+def test_fences_are_rounded_but_compared_exactly():
+    result = _outliers(pd.DataFrame({"x": [0.1, 0.2, 0.3, 0.4, 0.5, 9.0]}))["x"]
+    assert result["iqr_lower_bound"] == round(result["iqr_lower_bound"], 4)
+    assert result["iqr_indices"] == [5]

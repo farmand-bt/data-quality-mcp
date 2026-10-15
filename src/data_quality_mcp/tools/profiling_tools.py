@@ -105,10 +105,13 @@ def detect_outliers(file_path: FilePath) -> OutlierResult:
     Methods, per numeric (or mostly numeric) column:
     - IQR (primary): values outside [Q1 - 1.5 x IQR, Q3 + 1.5 x IQR].
       iqr_lower_bound / iqr_upper_bound are those fences (null when IQR is 0,
-      i.e. a constant column, in which case nothing is flagged).
+      i.e. a constant column, in which case only infinite values are flagged).
     - Classic z-score (secondary): |x - mean| / std > 3. Caveat: extreme values
       inflate the std and can hide other outliers, so the z-score often flags
       fewer values than IQR. Prefer IQR when they disagree.
+    Quartiles, mean and std are computed from finite values only; +/-inf
+    values are always flagged by both methods and counted in the column's
+    stats.infinite_count (see profile_dataset).
 
     Output: dataset (name, source, rows, columns) and outliers, a mapping from
     every column to its result, or null where detection doesn't apply

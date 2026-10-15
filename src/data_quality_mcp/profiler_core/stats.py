@@ -22,10 +22,15 @@ def _finite(value: float, ndigits: int = 4) -> float | None:
 
 def _numeric_stats(series: pd.Series) -> dict:
     parsed = pd.to_numeric(series, errors="coerce")
-    values = parsed.dropna()
+    numbers = parsed.dropna()
+    infinite = np.isinf(numbers.to_numpy(dtype=float))
+    # Moments are computed on finite values only; +/-inf is counted separately
+    # (a deviation from the analyzer, which would report mean = inf).
+    values = numbers[~infinite]
     unparseable = series[parsed.isna()].astype(str)
     stats: dict = {
-        "count": len(values),
+        "count": len(values),  # finite numeric values
+        "infinite_count": int(infinite.sum()),
         "mean": None,
         "median": None,
         "std": None,
@@ -105,10 +110,7 @@ def compute_column_stats(series: pd.Series, inferred_type: str) -> dict:
     """Statistics for one column, computed over its non-null values."""
     non_null = series.dropna()
     if inferred_type in ("numeric", "mixed"):
-        # Infinite values make moments non-finite (reported as None by
-        # _finite); silence numpy's per-reduction warnings about it.
-        with np.errstate(invalid="ignore", over="ignore"):
-            return _numeric_stats(non_null)
+        return _numeric_stats(non_null)
     if inferred_type in ("categorical", "boolean"):
         return _categorical_stats(non_null)
     if inferred_type == "datetime":

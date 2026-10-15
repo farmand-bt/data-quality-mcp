@@ -362,7 +362,10 @@ def test_infinite_values_are_flagged_and_json_safe():
     outliers = report["columns"]["a"]["outliers"]
     assert outliers["iqr_count"] == 2  # +inf and -inf fall outside the fences
     assert sorted(outliers["iqr_indices"]) == [19, 20]
-    assert report["columns"]["a"]["stats"]["mean"] is None  # not inf
+    stats = report["columns"]["a"]["stats"]
+    assert stats["mean"] == 10.0  # mean of the finite values 1..19
+    assert (stats["count"], stats["infinite_count"]) == (19, 2)
+    assert any("infinite value" in w for w in report["columns"]["a"]["warnings"])
 
 
 def test_indices_are_row_positions_for_any_input_index():

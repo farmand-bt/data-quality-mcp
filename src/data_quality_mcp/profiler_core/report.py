@@ -52,6 +52,7 @@ def _column_warnings(
     series: pd.Series,
     type_info: dict,
     missing_pct: float,
+    stats: dict,
     outliers: OutlierInfo | None,
     *,
     inconsistent_casing: bool,
@@ -89,6 +90,13 @@ def _column_warnings(
 
     if missing_pct < 100 and series.nunique(dropna=True) == 1:
         warnings.append("Constant column: every non-missing value is identical.")
+
+    infinite = stats.get("infinite_count", 0)
+    if infinite:
+        warnings.append(
+            f"{infinite:,} infinite value(s) (inf/-inf): replace them with a real "
+            "value or treat them as missing; statistics here exclude them."
+        )
 
     if outliers and outliers["iqr_pct"] > outlier_warning_pct:
         warnings.append(
@@ -152,18 +160,20 @@ def generate_report(
     columns: dict[str, ColumnReport] = {}
     for col in df.columns:
         col_missing = missing_info["per_column"][col]
+        stats = compute_column_stats(df[col], type_info[col]["inferred_type"])
         columns[col] = {
             "pandas_dtype": type_info[col]["pandas_dtype"],
             "inferred_type": type_info[col]["inferred_type"],
             "type_mismatch": type_info[col]["type_mismatch"],
             "missing_count": col_missing["missing_count"],
             "missing_pct": col_missing["missing_pct"],
-            "stats": compute_column_stats(df[col], type_info[col]["inferred_type"]),
+            "stats": stats,
             "outliers": outliers[col],
             "warnings": _column_warnings(
                 df[col],
                 type_info[col],
                 col_missing["missing_pct"],
+                stats,
                 outliers[col],
                 inconsistent_casing=col in inconsistent,
                 missing_threshold=missing_threshold,
