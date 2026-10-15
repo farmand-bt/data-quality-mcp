@@ -120,3 +120,29 @@ def test_permuted_values_are_not_false_near_duplicates():
     # Same multiset of values per row, but in different columns: not duplicates
     df = pd.DataFrame({"a": [1, 2], "b": [2, 1], "c": [3, 3], "d": [7, 8]})
     assert _near_duplicate_rows(df) == set()
+
+
+@pytest.mark.parametrize(
+    ("a", "b"),
+    [
+        (1, True),
+        (0, False),
+        (1, 1.0),
+        (None, np.nan),
+        (None, pd.NA),
+        (np.nan, pd.NA),
+        ("1", 1),
+        (-0.0, 0.0),
+        (pd.Timestamp("2020-01-01"), "2020-01-01"),
+    ],
+    ids=repr,
+)
+def test_hashed_search_uses_duplicated_equality(a, b):
+    """Values duplicated() treats as equal (or unequal) must hash the same way.
+
+    This relies on hash_pandas_object factorizing object columns first, which
+    CI checks on both pandas 2 and pandas 3."""
+    df = pd.DataFrame(
+        {"v": pd.array([a, b], dtype=object), "w": [7, 7], "k": ["p", "q"]}
+    )
+    assert _near_duplicate_rows(df) == _naive_near_duplicates(df)
