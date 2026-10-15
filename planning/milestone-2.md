@@ -35,6 +35,9 @@ The analysis is **ported from `llm-data-quality-analyzer` with the same behaviou
 | IQR bounds | not reported (the cleaner recomputes them) | `iqr_lower_bound` / `iqr_upper_bound` per column | Lets an agent explain *why* a value is an outlier. Additive only. |
 | Recommendation categories | missing, type, duplicate, outlier, correlation | the same, plus `consistency` | M1 reports inconsistent category labels as a warning instead of a type mismatch, so they need their own category |
 | Score | includes the +5 clean-column bonus | no bonus | Already decided and approved in M1 (it partly cancels out real problems) |
+| Infinite values *(fix PR after M2)* | included in quartiles, mean and std, so `mean = inf` and fences can be infinite | numeric stats, quartiles, mean and std use finite values only; ±inf is always flagged as an outlier, counted in `stats.infinite_count` and named in a column warning | A few `inf` cells shouldn't wipe out a column's statistics; an agent needs to be told about them explicitly. The score is unaffected. |
+| IQR fences *(fix PR after M2)* | not reported | rounded to 4 decimals for reporting; comparisons use the exact fences | Removes float noise such as `-3.6999999999999993` without changing which values are flagged |
+| Near-duplicate search *(fix PR after M2)* | one full `duplicated` pass per column | one hash per cell, then one uint64 pass per column, confirmed on real values | Identical results (checked against the analyzer's definition by a randomized test), about 13× faster: 21.6 s → 1.6 s at 500k rows × 50 columns |
 | `distribution` section, MCAR/MAR missing patterns | present | not ported | Not in the report schema. A candidate for a later milestone, ported as-is. |
 
 ---
@@ -165,4 +168,5 @@ The rules are ported from the analyzer's `recommendations.py`, plus `consistency
 - **Tests:** the analyzer's outlier, duplicate, correlation and recommendation cases are ported into `TestAnalyzerParity` classes (one file per module). 180 tests pass on Python 3.12/pandas 3 and Python 3.10/pandas 2, with 97% coverage.
 - **Performance:** a synthetic 500k × 10 dataset produces the full report in about 15 s, and the report is about 10 KB thanks to the index caps.
 - **Version:** 0.2.0.
+- **Follow-up fix PR (after the Claude review of #6):** faster near-duplicate search with identical results, finite-only statistics and fences with explicit infinite-value reporting, and rounded fences. See the last three rows of the deviations table. The messy-sample figures are unchanged (it contains no infinite values).
 

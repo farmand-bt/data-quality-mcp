@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "data-quality": {
-      "command": "C:\\Users\\YOU\\path\\to\\data-quality-mcp\\.venv\\Scripts\\data-quality-mcp.exe",
+      "command": "C:\\Users\\YOU\\.local\\bin\\data-quality-mcp.exe",
       "args": []
     }
   }
