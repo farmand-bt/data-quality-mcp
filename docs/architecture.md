@@ -85,10 +85,11 @@ The analyzer's "+5 clean-column bonus" was dropped in Milestone 1, because it co
 
 - **Outliers**, per numeric or mixed column:
   - **IQR (primary):** values outside the fences `[Q1 − 1.5 × IQR, Q3 + 1.5 × IQR]`. The fences are reported as `iqr_lower_bound` / `iqr_upper_bound`. IQR alone drives the score, the recommendations and the warnings.
+  - **Infinite values:** quartiles, mean and std are computed from finite values only. ±inf is always flagged by both methods, counted in the column's `stats.infinite_count`, and named in a column warning. Fences are reported rounded to 10 significant digits (no float noise like `-3.6999999999999993`, and small-scale fences keep their precision); comparisons use the exact fences. With fewer than 4 finite values, only the infinite values are flagged and the fences are `null`.
   - **Classic z-score (secondary):** `|x − mean| / std > 3`. Extreme values inflate the std and can mask other outliers. On the messy sample, z flags 2 price outliers where IQR flags 15. It is kept for parity with the analyzer, and the tool docstrings tell agents to prefer IQR.
 - **Duplicates:**
   - exact duplicates: `exact_count` is how many rows deduplication would remove
-  - near-duplicates: rows identical on all columns but one, excluding exact duplicates, skipped above 50 columns. They're reported but not scored. This is the most expensive step: one full pass per column, about 25 s of the roughly 29 s full report at the limits (500k rows × 50 columns). The column limit is the analyzer's own, kept for parity.
+  - near-duplicates: rows identical on all columns but one, excluding exact duplicates, skipped above 50 columns. They're reported but not scored. Each cell is hashed once, and a row's "all columns but one" key is the wrapping sum of its column hashes minus one term, so each column needs only one cheap uint64 pass. Hash matches are confirmed on the real values, so the result is exactly the analyzer's definition (a randomized test checks this). At the limits (500k rows × 50 columns), this takes about 1.6 s, compared with 21.6 s for the per-column full-row passes.
 - **Correlations:** Pearson over the first 50 numeric columns, and Cramér's V (`scipy` χ², no bias correction) over the first 15 categorical/boolean columns with at most 50 distinct values. Pairs with |value| ≥ 0.9 are listed strongest first.
 
 ## MCP surface

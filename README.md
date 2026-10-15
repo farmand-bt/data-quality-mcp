@@ -40,20 +40,30 @@ make test           # or: uv run pytest --cov
 
 The server speaks MCP over stdio, so the client launches it. Always use **absolute paths**: the client starts the server from an arbitrary working directory.
 
-**Claude Desktop:** edit `%APPDATA%\Claude\claude_desktop_config.json` on Windows, or `~/Library/Application Support/Claude/claude_desktop_config.json` on macOS. See [`examples/claude_desktop_config.json`](examples/claude_desktop_config.json):
+**Claude Desktop:** give the client its **own installation**, so it never locks your development environment:
+
+```bash
+uv tool install --editable .     # once; installs data-quality-mcp.exe into ~/.local/bin
+```
+
+Then add an entry to `claude_desktop_config.json` (**Settings → Developer → Edit Config** opens the right file; the Microsoft Store version keeps it under `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\`). Merge it into any existing `mcpServers`, and fully quit and reopen Claude Desktop afterwards:
 
 ```json
 {
   "mcpServers": {
     "data-quality": {
-      "command": "C:\\path\\to\\data-quality-mcp\\.venv\\Scripts\\data-quality-mcp.exe",
+      "command": "C:\\Users\\YOU\\.local\\bin\\data-quality-mcp.exe",
       "args": []
     }
   }
 }
 ```
 
-On macOS/Linux, the command is `/path/to/data-quality-mcp/.venv/bin/data-quality-mcp`. As an alternative to the venv executable, you can have uv launch it: set `"command"` to the absolute path of `uv` (from `where uv` or `which uv`) and `"args"` to `["--directory", "/path/to/data-quality-mcp", "run", "data-quality-mcp"]`.
+The install is **editable**: it runs the code you have checked out, and code changes apply the next time the client starts the server. Only when *dependencies* change, quit the client and run `uv tool install --editable . --reinstall`.
+
+> **Why not point the client at `.venv\Scripts\data-quality-mcp.exe`?** That works, but on Windows a running server locks that file, so `uv sync` / `make install` fail with "file in use" while the client is open. A separate tool install avoids this.
+
+On macOS/Linux the command is `~/.local/bin/data-quality-mcp` (use the absolute path). Alternatively, have uv launch the project directly: set `"command"` to the absolute path of `uv` (from `where uv` or `which uv`) and `"args"` to `["--directory", "/path/to/data-quality-mcp", "run", "data-quality-mcp"]`.
 
 **Cursor:** use the same entry in `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global), adding `"type": "stdio"`.
 

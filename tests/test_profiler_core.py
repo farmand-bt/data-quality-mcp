@@ -362,7 +362,10 @@ def test_infinite_values_are_flagged_and_json_safe():
     outliers = report["columns"]["a"]["outliers"]
     assert outliers["iqr_count"] == 2  # +inf and -inf fall outside the fences
     assert sorted(outliers["iqr_indices"]) == [19, 20]
-    assert report["columns"]["a"]["stats"]["mean"] is None  # not inf
+    stats = report["columns"]["a"]["stats"]
+    assert stats["mean"] == 10.0  # mean of the finite values 1..19
+    assert (stats["count"], stats["infinite_count"]) == (19, 2)
+    assert any("infinite value" in w for w in report["columns"]["a"]["warnings"])
 
 
 def test_indices_are_row_positions_for_any_input_index():
@@ -383,3 +386,16 @@ def test_zero_row_frame_does_not_crash():
     json.dumps(report, allow_nan=False)
     assert report["columns"]["a"]["outliers"] is None
     assert report["duplicates"]["exact_count"] == 0
+
+
+def test_column_of_only_infinite_values():
+    df = pd.DataFrame({"a": [np.inf, -np.inf, np.inf, np.inf, -np.inf], "b": range(5)})
+    report = generate_report(df, "inf.csv", "file_path")
+    json.dumps(report, allow_nan=False)
+    column = report["columns"]["a"]
+    # No finite values for fences, but every infinite value is still flagged
+    assert column["outliers"]["iqr_lower_bound"] is None
+    assert column["outliers"]["iqr_count"] == 5
+    assert (column["stats"]["count"], column["stats"]["infinite_count"]) == (0, 5)
+    assert column["stats"]["mean"] is None
+    assert any("5 infinite value(s)" in w for w in column["warnings"])

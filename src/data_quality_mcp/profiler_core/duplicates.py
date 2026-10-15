@@ -6,10 +6,57 @@ sorted for deterministic output and both lists share one cap, reported via
 `indices_truncated`.
 """
 
+import numpy as np
 import pandas as pd
 
 from data_quality_mcp import config
 from data_quality_mcp.profiler_core.schema import DuplicateInfo
+
+# Odd multipliers make each column's hash contribution distinct, so rows whose
+# values are merely permuted across columns rarely produce the same key.
+_COLUMN_MIX = np.uint64(0x9E3779B97F4A7C15)
+
+
+def _near_duplicate_rows(df: pd.DataFrame) -> set[int]:
+    """Rows equal to at least one other row on every column but one.
+
+    Same result as running `df.duplicated(subset=<all but c>, keep=False)` for
+    each column c, but each cell is hashed once instead of every column being
+    re-compared per pass. A row's key for "all columns except c" is the
+    (wrapping) sum of its per-column hashes minus column c's term, so each pass
+    only deduplicates one uint64 array. Hash equality is only a filter: every
+    candidate group is confirmed on the real values, so a hash collision can
+    never add a false near-duplicate.
+
+    Columns and rows are addressed by position, so duplicate column names or a
+    non-unique index can't select the wrong data. Returns labels of `df.index`.
+    """
+    n_rows, n_cols = df.shape
+    # One preallocated (n, k) array filled in place keeps the peak memory to a
+    # single uint64 matrix (about 200 MB at 500k rows x 50 columns).
+    # Array (not scalar) uint64 arithmetic wraps modulo 2**64 silently, which
+    # is intended; numpy only warns about overflow for scalar operations.
+    mixers = (
+        np.arange(n_cols, dtype=np.uint64) * np.uint64(2) + np.uint64(1)
+    ) * _COLUMN_MIX
+    terms = np.empty((n_rows, n_cols), dtype=np.uint64)
+    for j in range(n_cols):
+        hashes = pd.util.hash_pandas_object(df.iloc[:, j], index=False)
+        np.multiply(hashes.to_numpy(np.uint64), mixers[j : j + 1], out=terms[:, j])
+    total = terms.sum(axis=1, dtype=np.uint64)
+
+    rows: set[int] = set()
+    for j in range(n_cols):
+        candidates = np.flatnonzero(
+            pd.Series(total - terms[:, j]).duplicated(keep=False).to_numpy()
+        )
+        if len(candidates) == 0:
+            continue
+        others = [k for k in range(n_cols) if k != j]
+        subset = df.iloc[candidates, others]
+        confirmed = candidates[subset.duplicated(keep=False).to_numpy()]
+        rows.update(int(i) for i in df.index[confirmed])
+    return rows
 
 
 def analyze_duplicates(
@@ -23,8 +70,7 @@ def analyze_duplicates(
     exact_count is the number of rows that would be dropped keeping the first
     copy; sample_indices lists every row in a duplicate group. Near-duplicate
     search is skipped for fewer than 2 or more than `max_near_duplicate_columns`
-    columns, and excludes rows that are already exact duplicates. Its cost is
-    one full pass per column (about 25 s at 500k rows x 50 columns).
+    columns, and excludes rows that are already exact duplicates.
 
     Indices are labels of `df.index`; callers pass a 0-based RangeIndex (as
     report.py does) so they are row positions.
@@ -47,12 +93,7 @@ def analyze_duplicates(
 
     near_rows: set[int] = set()
     if 2 <= len(df.columns) <= max_near_duplicate_columns:
-        exact_set = set(exact_rows)
-        for col in df.columns:
-            others = [c for c in df.columns if c != col]
-            near = df.duplicated(subset=others, keep=False)
-            near_rows.update(int(i) for i in near[near].index)
-        near_rows -= exact_set
+        near_rows = _near_duplicate_rows(df) - set(exact_rows)
     near_sorted = sorted(near_rows)
 
     return {

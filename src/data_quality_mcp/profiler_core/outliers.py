@@ -16,6 +16,12 @@ _NUMERIC_TYPES = ("numeric", "mixed")
 _MIN_VALUES = 4  # Fewer numeric values than this: detection isn't meaningful
 
 
+def _significant(value: float, digits: int = 10) -> float:
+    """Round to significant digits: drops float noise (-3.6999999999999993 ->
+    -3.7) without flattening small-scale values the way fixed decimals would."""
+    return float(f"{value:.{digits}g}")
+
+
 def _capped(mask: pd.Series, max_indices: int) -> tuple[list[int], bool]:
     indices = sorted(int(i) for i in mask[mask].index)
     return indices[:max_indices], len(indices) > max_indices
@@ -29,33 +35,46 @@ def detect_column_outliers(
     zscore_threshold: float = config.OUTLIER_ZSCORE_THRESHOLD,
     max_indices: int = config.MAX_REPORTED_INDICES,
 ) -> OutlierInfo | None:
-    """Outliers in one column, or None when there are fewer than 4 numbers."""
+    """Outliers in one column.
+
+    Quartiles, mean and std come from the finite values only, so a few +/-inf
+    cells can't distort the fences. +/-inf values themselves are always
+    flagged by both methods. With fewer than 4 finite numbers the fences
+    aren't meaningful: the result then flags only the infinite values (bounds
+    None), or is None when there are none. (Deviation from the analyzer, which
+    computes on all values including inf; see planning/milestone-2.md.)
+    """
     values = pd.to_numeric(series, errors="coerce")
-    valid = values.dropna()
-    if len(valid) < _MIN_VALUES:
-        return None
+    infinite = np.isinf(values.to_numpy(dtype=float, na_value=np.nan))
+    infinite = pd.Series(infinite, index=values.index)
+    finite = values[values.notna() & ~infinite]
 
-    q1 = float(valid.quantile(0.25))
-    q3 = float(valid.quantile(0.75))
-    iqr = q3 - q1
-    if iqr == 0:
-        lower = upper = None
-        iqr_mask = pd.Series(False, index=values.index)
+    lower = upper = None
+    if len(finite) < _MIN_VALUES:
+        if not infinite.any():
+            return None
+        iqr_mask = z_mask = infinite
     else:
-        lower = q1 - iqr_multiplier * iqr
-        upper = q3 + iqr_multiplier * iqr
-        iqr_mask = values.notna() & ((values < lower) | (values > upper))
-
-    # Infinite values make mean/std non-finite; numpy then warns on every
-    # reduction. The result (no z-score flags) is correct, so silence the noise.
-    with np.errstate(invalid="ignore", over="ignore"):
-        mean = float(valid.mean())
-        std = float(valid.std())
-        if std == 0:
-            z_mask = pd.Series(False, index=values.index)
+        q1 = float(finite.quantile(0.25))
+        q3 = float(finite.quantile(0.75))
+        iqr = q3 - q1
+        if iqr == 0:
+            iqr_mask = infinite
         else:
-            z_scores = ((values - mean) / std).abs()
-            z_mask = values.notna() & (z_scores > zscore_threshold)
+            fence_lo = q1 - iqr_multiplier * iqr
+            fence_hi = q3 + iqr_multiplier * iqr
+            iqr_mask = values.notna() & ((values < fence_lo) | (values > fence_hi))
+            # Compare against the exact fences; report them without float noise
+            lower, upper = _significant(fence_lo), _significant(fence_hi)
+
+        mean = float(finite.mean())
+        std = float(finite.std())
+        if std == 0:
+            z_mask = infinite
+        else:
+            z_mask = infinite | (
+                values.notna() & ((values - mean) / std).abs().gt(zscore_threshold)
+            )
 
     iqr_count = int(iqr_mask.sum())
     z_count = int(z_mask.sum())

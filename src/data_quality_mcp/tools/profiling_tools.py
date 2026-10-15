@@ -81,8 +81,11 @@ def profile_dataset(file_path: FilePath) -> DatasetReport:
       inferred_type (numeric, categorical, datetime, boolean, text or mixed),
       type_mismatch, missing_count, missing_pct, stats (fields depend on
       inferred_type; for numeric/mixed columns, non_numeric_examples shows the
-      offending values), outliers (see detect_outliers; null when not
-      applicable), and warnings (plain-language issues with suggested fixes).
+      offending values, and count/mean/std/etc. cover finite numbers only:
+      +/-inf values are excluded and counted separately in infinite_count, so
+      count can be lower than rows - missing_count), outliers (see
+      detect_outliers; null when not applicable), and warnings
+      (plain-language issues with suggested fixes).
     - duplicates: see find_duplicates. correlations: see analyze_correlations.
     - generated_at: UTC timestamp.
 
@@ -105,14 +108,18 @@ def detect_outliers(file_path: FilePath) -> OutlierResult:
     Methods, per numeric (or mostly numeric) column:
     - IQR (primary): values outside [Q1 - 1.5 x IQR, Q3 + 1.5 x IQR].
       iqr_lower_bound / iqr_upper_bound are those fences (null when IQR is 0,
-      i.e. a constant column, in which case nothing is flagged).
+      i.e. a constant column, in which case only infinite values are flagged).
     - Classic z-score (secondary): |x - mean| / std > 3. Caveat: extreme values
       inflate the std and can hide other outliers, so the z-score often flags
       fewer values than IQR. Prefer IQR when they disagree.
+    Quartiles, mean and std are computed from finite values only; +/-inf
+    values are always flagged by both methods and counted in the column's
+    stats.infinite_count (see profile_dataset).
 
     Output: dataset (name, source, rows, columns) and outliers, a mapping from
     every column to its result, or null where detection doesn't apply
-    (non-numeric columns, or fewer than 4 numeric values). *_pct is relative to
+    (non-numeric columns, or fewer than 4 finite numbers and no infinite
+    values; with infinite values, only those are flagged). *_pct is relative to
     all rows. *_indices are 0-based data-row positions (CSV line = index + 2),
     sorted and capped at 50; indices_truncated is true when a list was cut.
 
