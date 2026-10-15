@@ -118,7 +118,8 @@ def detect_outliers(file_path: FilePath) -> OutlierResult:
 
     Output: dataset (name, source, rows, columns) and outliers, a mapping from
     every column to its result, or null where detection doesn't apply
-    (non-numeric columns, or fewer than 4 numeric values). *_pct is relative to
+    (non-numeric columns, or fewer than 4 finite numbers and no infinite
+    values; with infinite values, only those are flagged). *_pct is relative to
     all rows. *_indices are 0-based data-row positions (CSV line = index + 2),
     sorted and capped at 50; indices_truncated is true when a list was cut.
 

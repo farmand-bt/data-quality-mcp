@@ -85,7 +85,7 @@ The analyzer's "+5 clean-column bonus" was dropped in Milestone 1, because it co
 
 - **Outliers**, per numeric or mixed column:
   - **IQR (primary):** values outside the fences `[Q1 − 1.5 × IQR, Q3 + 1.5 × IQR]`. The fences are reported as `iqr_lower_bound` / `iqr_upper_bound`. IQR alone drives the score, the recommendations and the warnings.
-  - **Infinite values:** quartiles, mean and std are computed from finite values only. ±inf is always flagged by both methods, counted in the column's `stats.infinite_count`, and named in a column warning. Fences are rounded to 4 decimals for reporting; comparisons use the exact fences.
+  - **Infinite values:** quartiles, mean and std are computed from finite values only. ±inf is always flagged by both methods, counted in the column's `stats.infinite_count`, and named in a column warning. Fences are reported rounded to 10 significant digits (no float noise like `-3.6999999999999993`, and small-scale fences keep their precision); comparisons use the exact fences. With fewer than 4 finite values, only the infinite values are flagged and the fences are `null`.
   - **Classic z-score (secondary):** `|x − mean| / std > 3`. Extreme values inflate the std and can mask other outliers. On the messy sample, z flags 2 price outliers where IQR flags 15. It is kept for parity with the analyzer, and the tool docstrings tell agents to prefer IQR.
 - **Duplicates:**
   - exact duplicates: `exact_count` is how many rows deduplication would remove

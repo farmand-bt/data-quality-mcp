@@ -128,12 +128,29 @@ def test_infinite_values_flagged_even_when_iqr_is_zero():
     assert result["zscore_indices"] == [8]
 
 
-def test_fewer_than_four_finite_values_is_none():
-    values = [1.0, 2.0, 3.0, np.inf, np.inf]
-    assert detect_column_outliers(pd.Series(values), len(values)) is None
+def test_fewer_than_four_finite_values_still_flags_infinite():
+    values = [1.0, 2.0, 3.0, np.inf, -np.inf]
+    result = detect_column_outliers(pd.Series(values), len(values))
+    assert (result["iqr_lower_bound"], result["iqr_upper_bound"]) == (None, None)
+    assert result["iqr_indices"] == result["zscore_indices"] == [3, 4]
+    assert result["iqr_count"] == result["zscore_count"] == 2
 
 
-def test_fences_are_rounded_but_compared_exactly():
+def test_fewer_than_four_finite_values_without_inf_is_none():
+    assert detect_column_outliers(pd.Series([1.0, 2.0, 3.0]), 3) is None
+
+
+def test_fences_drop_float_noise():
+    # Exact fences here are -0.14999999999999994 and 0.8499999999999999
     result = _outliers(pd.DataFrame({"x": [0.1, 0.2, 0.3, 0.4, 0.5, 9.0]}))["x"]
-    assert result["iqr_lower_bound"] == round(result["iqr_lower_bound"], 4)
+    assert (result["iqr_lower_bound"], result["iqr_upper_bound"]) == (-0.15, 0.85)
+    assert result["iqr_indices"] == [5]
+
+
+def test_small_scale_fences_keep_precision():
+    # Fixed 4-decimal rounding would report these fences as -0.0 and 0.0001
+    values = [1e-5, 2e-5, 3e-5, 4e-5, 5e-5, 9e-4]
+    result = _outliers(pd.DataFrame({"x": values}))["x"]
+    assert result["iqr_lower_bound"] == -1.5e-05
+    assert result["iqr_upper_bound"] == 8.5e-05
     assert result["iqr_indices"] == [5]
