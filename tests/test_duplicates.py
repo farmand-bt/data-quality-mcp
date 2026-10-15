@@ -1,10 +1,14 @@
 """Duplicate detection. The TestAnalyzerParity cases are ported from the Data
 Quality Analyzer's TestDuplicates."""
 
+import numpy as np
 import pandas as pd
 import pytest
 
-from data_quality_mcp.profiler_core.duplicates import analyze_duplicates
+from data_quality_mcp.profiler_core.duplicates import (
+    _near_duplicate_rows,
+    analyze_duplicates,
+)
 from data_quality_mcp.profiler_core.schema import DuplicateInfo
 
 
@@ -79,3 +83,40 @@ def test_indices_are_capped_and_flagged():
     assert result["exact_count"] == 9
     assert result["sample_indices"] == [0, 1, 2, 3]
     assert result["indices_truncated"] is True
+
+
+# --- the hashed near-duplicate search returns exactly the naive result ---
+
+
+def _naive_near_duplicates(df: pd.DataFrame) -> set[int]:
+    """The analyzer's definition, verbatim: one full pass per column."""
+    rows: set[int] = set()
+    for col in df.columns:
+        mask = df.duplicated(subset=[c for c in df.columns if c != col], keep=False)
+        rows.update(int(i) for i in mask[mask].index)
+    return rows
+
+
+def _random_frame(rng: np.random.Generator) -> pd.DataFrame:
+    n, k = int(rng.integers(2, 60)), int(rng.integers(2, 6))
+    makers = [
+        lambda: rng.integers(0, 3, n),
+        lambda: np.where(rng.random(n) < 0.3, np.nan, rng.integers(0, 3, n) * 1.0),
+        lambda: rng.choice(["a", "b", None], n),
+        lambda: pd.array(rng.choice([1, 2, 1.0, "1", None], n), dtype=object),
+        lambda: rng.choice([True, False], n),
+    ]
+    return pd.DataFrame({f"c{j}": makers[rng.integers(0, 5)]() for j in range(k)})
+
+
+def test_hashed_search_matches_naive_definition():
+    rng = np.random.default_rng(2026)
+    for _ in range(200):
+        df = _random_frame(rng)
+        assert _near_duplicate_rows(df) == _naive_near_duplicates(df), df
+
+
+def test_permuted_values_are_not_false_near_duplicates():
+    # Same multiset of values per row, but in different columns: not duplicates
+    df = pd.DataFrame({"a": [1, 2], "b": [2, 1], "c": [3, 3], "d": [7, 8]})
+    assert _near_duplicate_rows(df) == set()
