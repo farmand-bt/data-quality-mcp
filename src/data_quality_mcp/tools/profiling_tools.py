@@ -81,8 +81,11 @@ def profile_dataset(file_path: FilePath) -> DatasetReport:
       inferred_type (numeric, categorical, datetime, boolean, text or mixed),
       type_mismatch, missing_count, missing_pct, stats (fields depend on
       inferred_type; for numeric/mixed columns, non_numeric_examples shows the
-      offending values), outliers (see detect_outliers; null when not
-      applicable), and warnings (plain-language issues with suggested fixes).
+      offending values, and count/mean/std/etc. cover finite numbers only:
+      +/-inf values are excluded and counted separately in infinite_count, so
+      count can be lower than rows - missing_count), outliers (see
+      detect_outliers; null when not applicable), and warnings
+      (plain-language issues with suggested fixes).
     - duplicates: see find_duplicates. correlations: see analyze_correlations.
     - generated_at: UTC timestamp.
 
