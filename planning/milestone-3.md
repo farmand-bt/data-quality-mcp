@@ -43,13 +43,17 @@ The cleaning handlers are **ported from `llm-data-quality-analyzer` with the sam
 | `cap_iqr` `outliers_treated` | the number of report indices, even though the fences are recomputed at step time | the number of values actually clipped | Accurate log, since an earlier fill can move the fences |
 | Log fields | different keys per action | one shape, plus `values_nulled` (D7) | Output schema, and the invariant "log how many rows were affected" |
 | Output format | download both CSV and XLSX | one file in the format of `output_path` (default: same as input); inline output matches the input format | One output per call |
+| UNC and device paths *(this repo's M1/M2 loader, not the analyzer)* | the profiling tools accepted any `file_path` | rejected on Windows for `file_path` and `output_path` (D2). This also blocks `\\?\C:\...` long paths. `ALLOW_NETWORK_PATHS` opts back in; POSIX is unaffected | Avoids NTLM credential leaks over SMB when untrusted data steers an agent |
+| Spreadsheet formula injection | cells starting with `=`, `+`, `-` or `@` are written as-is | the same: no escaping (out of scope) | Escaping would alter data, e.g. negative numbers stored as text. The README trust note warns that a cleaned file from untrusted data can contain live formulas when opened in Excel |
 | Missing-value pattern classification | present | still not ported (D9) | Measured mislabelling; separate spec |
 
 ---
 
 ## Schema changes (proposed)
 
-These become the contract in `planning/project-overview.md`, `profiler_core/schema.py` and a new `cleaner_core/schema.py` once this spec is merged. **The report (`DatasetReport`) is unchanged.**
+These become the contract in `planning/project-overview.md` and the code once this spec is merged. **The report (`DatasetReport`) is unchanged.** Where the types live:
+- **`profiler_core/schema.py`** keeps every output type, the cleaning results included: `CleaningResult`, `CleaningOutput`, `CleaningLogEntry` and the before/after `QualitySnapshot`. It stays the single home of the output contract that CLAUDE.md names, and `CleaningResult` reuses `DatasetSummary` from there instead of a duplicate.
+- **`cleaner_core/schema.py`** holds only the cleaning *input* types: the four step TypedDicts and their discriminated union.
 
 **Tool inputs (all five tools):** `file_path: str | None`, `inline_content: str | None` and `filename_hint: str | None`. `file_path` is no longer required. For inline input, `dataset.source` is `"inline_content"` (already in the `InputSource` literal) and `dataset.name` is `filename_hint`.
 
@@ -133,7 +137,7 @@ Merging this spec also approves one change to `CLAUDE.md`. The cleaning rule und
 3. **Config:** `MAX_CLEANING_STEPS = 50`, `MAX_INLINE_OUTPUT_MB = 1`, `MAX_XLSX_UNCOMPRESSED_MB = 200`, `MAX_XLSX_ENTRIES = 1000`, `ALLOW_NETWORK_PATHS = False`, and the output suffix `_cleaned`.
 4. **`profiler_core/report.py`:** expose uncapped outlier rows for the cleaner (same function, `max_indices=None`), and a before/after snapshot builder (D8).
 5. **`tools/profiling_tools.py`:** add `inline_content` / `filename_hint` to all four tools through the shared `_run` helper, and update the docstrings (D1, D2).
-6. **`tools/cleaning_tools.py`:** `clean_dataset`, with the annotations from task 0. It is a thin adapter: it passes its arguments to `run_cleaning` and maps `DataQualityError` to `ToolError`. Its docstring explains the step schema, the ordering rule, that outlier rows are the ones `detect_outliers` reports, the output naming, the no-overwrite guarantee, inline output, and common errors.
+6. **`tools/cleaning_tools.py`:** `clean_dataset`, with the annotations from task 0. It is a thin adapter: it passes its arguments to `run_cleaning` and maps `DataQualityError` to `ToolError`. The docstring and the over-cap error both say that the 1 MB inline-output cap applies to the encoded string, so for XLSX (base64) it allows about 0.75 MB of file data. Its docstring explains the step schema, the ordering rule, that outlier rows are the ones `detect_outliers` reports, the output naming, the no-overwrite guarantee, inline output, and common errors.
 7. **`server.py` / `tools/prompts.py`:** register the cleaning tools and update `INSTRUCTIONS`. `review_data_quality` keeps saying "don't modify without asking", and adds that, once the user agrees, the plan can be applied with `clean_dataset`.
 8. **Tests:**
    - **Analyzer parity:** port `tests/test_cleaner.py` (handlers, pipeline, step priority, `cap_iqr` with infinite values) into `TestAnalyzerParity` classes, adapted only where a deviation applies.
@@ -162,15 +166,15 @@ Merging this spec also approves one change to `CLAUDE.md`. The cleaning rule und
      - a missing `filename_hint`, a `filename_hint` with `/` or `\` directories (reduced to the basename on every OS), an upper-case extension, and an unsupported extension
      - UNC and device paths, including forward-slash forms, rejected for `file_path` and `output_path` on Windows, and accepted with `ALLOW_NETWORK_PATHS`
      - an upper-case input extension gets a lower-case default output extension
-   - **Step schema bounds:** `steps: []` and 51 steps are rejected, `keep: null` is rejected rather than read as `"none"`, and a timezone-aware `fill_constant` value on a naive datetime column is an error.
      - both and neither of `file_path` and `inline_content`, at tool level
      - an XLSX over the uncompressed limit or the entry limit
+   - **Step schema bounds:** `steps: []` and 51 steps are rejected, `keep: null` is rejected rather than read as `"none"`, and a timezone-aware `fill_constant` value on a naive datetime column is an error.
    - **Tools:** five tools listed, with correct annotations and output schemas, plus the stdio subprocess test.
    - Coverage stays ≥ 85%.
 9. **Performance:** time `clean_dataset` on a synthetic 500,000 × 10 file (load, two reports and the steps) and report the number in the PR.
 10. **Docs:**
     - `planning/project-overview.md`: both places that say inline data is base64 (the scaffolding note on `loader.py` and **Dual Input Mode**, per D2), tool list, `CleaningResult`, roadmap
-    - `README.md`: also the trusted-local note for file paths (D4)
+    - `README.md`: also the trusted-local note for file paths (D4) and the formula-injection warning for cleaned files
     - `docs/architecture.md`: the cleaning layer, step order, output rules
     - `README.md`: tools table, inline input, a cleaning example
     - `CLAUDE.md`: the cleaning invariant as worded under **Invariant change**
