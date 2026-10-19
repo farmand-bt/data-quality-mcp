@@ -168,5 +168,5 @@ The rules are ported from the analyzer's `recommendations.py`, plus `consistency
 - **Tests:** the analyzer's outlier, duplicate, correlation and recommendation cases are ported into `TestAnalyzerParity` classes (one file per module). 180 tests pass on Python 3.12/pandas 3 and Python 3.10/pandas 2, with 97% coverage.
 - **Performance:** a synthetic 500k × 10 dataset produces the full report in about 15 s, and the report is about 10 KB thanks to the index caps.
 - **Version:** 0.2.0.
-- **Follow-up fix PR (after the Claude review of #6):** faster near-duplicate search with identical results, finite-only statistics and fences with explicit infinite-value reporting, and rounded fences. See the last three rows of the deviations table. The messy-sample figures are unchanged (it contains no infinite values).
+- **Follow-up fix PR (after the Claude review of #6):** faster near-duplicate search with identical results, finite-only statistics and fences with explicit infinite-value reporting, and rounded fences. See the last three rows of the deviations table. The messy-sample figures are unchanged (it contains no infinite values). Both fixes were ported to the analyzer in its PR #1.
 

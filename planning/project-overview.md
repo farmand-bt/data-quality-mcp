@@ -161,7 +161,7 @@ This project is built across 5 milestones — deliberately fewer and lighter tha
 |-----------|---------------------------------------|-------------------------------------------------------------------------------|
 | **1** ✅  | **Scaffolding + Core Profiling** ([spec](milestone-1.md)) | Repo setup, `profiler_core` (types/stats/missing), first tool (`profile_dataset`) over stdio |
 | **2** ✅  | **Expanded Tool Surface** ([spec](milestone-2.md)) | Outliers, duplicates, correlations, recommendations tools; a resource; a prompt |
-| **3**     | **Flexible Input + Cleaning Tools**   | Inline data support (not just file paths), cleaning tools ported from the cleaner engine |
+| **3**     | **Flexible Input + Cleaning Tools** ([spec](milestone-3.md)) | Inline data support (not just file paths), cleaning tools ported from the cleaner engine |
 | **4**     | **Remote Deployment**                 | Streamable HTTP transport, Docker, minimal auth, a live deployment            |
 | **5**     | **Polish & Docs**                     | README with connection guides, full test pass, optional MCP registry listing  |
 
