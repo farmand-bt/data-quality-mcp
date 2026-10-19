@@ -34,6 +34,8 @@ _spec.loader.exec_module(hook)
         "cd repo\ngh pr create -t x",
         "out=$(gh pr create -t x)",
         "gh pr new -t x",
+        "gh -R owner/repo pr create -t x",
+        "gh --repo=owner/repo pr create -t x",
         "gh pr \\\n  create -t x",
         "gh pr `\n  create -t x",
     ],
@@ -128,6 +130,7 @@ def test_help_is_not_gated(repo):
         'git commit -qm "fix" && gh pr create -t x',
         "git switch other && gh pr create -t x",
         "cd ../other && gh pr create -t x",
+        'git -C ../other commit -qm "fix" && gh pr create -t x',
         'git commit -qm "fix"\ngh pr create -t x',
     ],
 )
@@ -154,6 +157,10 @@ def test_other_repository_is_outside_the_gate(repo):
     assert _run(repo, "check", stdin=other).returncode == 0
     same = _payload("gh pr create --repo me/this-repo -t x")
     assert _run(repo, "check", stdin=same).returncode == 2
+    flag_first = _payload("gh -R me/this-repo pr create -t x")
+    assert _run(repo, "check", stdin=flag_first).returncode == 2
+    other_first = _payload("gh -R me/another-repo pr create --head feat -t x")
+    assert _run(repo, "check", stdin=other_first).returncode == 0
 
 
 def test_outside_a_git_repository_nothing_is_gated(tmp_path):

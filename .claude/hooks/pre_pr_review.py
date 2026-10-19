@@ -33,6 +33,8 @@ _CMD_START = r"(?:^|[;&|({`\n]|\$\()\s*"
 PR_CREATE = re.compile(
     _CMD_START + r"(?:&\s*)?"
     r"(?P<exe>\"[^\"\n]*\"|'[^'\n]*'|\$\{\w+\}|[^\s;&|(){}`\"']+)"
+    # global flags before the subcommand, e.g. `gh -R owner/repo pr create`
+    r"(?P<pre>(?:\s+-{1,2}[\w-]+(?:[=\s]+[^\s;&|\-][^\s;&|]*)?)*)"
     r"\s+pr\s+(?:create|new)\b(?P<args>[^;&|\n]*)",
     re.MULTILINE,
 )
@@ -43,8 +45,10 @@ GH_EXE = re.compile(r"(?:^|[\\/])gh(?:\.exe)?$|^\$\{?\w*GH\w*\}?$", re.IGNORECAS
 CONTINUATION = re.compile(r"[\\`]\r?\n")
 # Commands that change HEAD or the directory before gh would run.
 MOVES_HEAD = re.compile(
-    _CMD_START + r"(?:git\s+(?:commit|switch|checkout|reset|rebase|merge|"
-    r"cherry-pick|am|pull|stash)\b|cd\b|pushd\b|Set-Location\b)",
+    # `git [-C dir] [-c key=value] <subcommand>`
+    _CMD_START + r"(?:git(?:\s+-[Cc]\s+\S+)*\s+"
+    r"(?:commit|switch|checkout|reset|rebase|merge|cherry-pick|am|pull|stash)\b"
+    r"|cd\b|pushd\b|Set-Location\b)",
     re.MULTILINE | re.IGNORECASE,
 )
 HELP = re.compile(r"(?:^|\s)(?:-h|--help)\b")
@@ -53,10 +57,10 @@ HEAD = re.compile(r"(?:^|\s)(?:-H|--head)[=\s]+[\"']?([^\s\"']+)")
 
 
 def pr_invocations(command: str) -> list[str]:
-    """The argument strings of every `gh pr create`/`gh pr new` in `command`."""
+    """The flags and arguments of every `gh pr create`/`gh pr new` in `command`."""
     command = CONTINUATION.sub(" ", command)
     return [
-        m.group("args")
+        m.group("pre") + " " + m.group("args")
         for m in PR_CREATE.finditer(command)
         if GH_EXE.search(m.group("exe").strip("\"'"))
     ]
