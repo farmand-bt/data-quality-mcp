@@ -8,19 +8,22 @@ Instructions for Codex (local CLI and GitHub code review) working on this reposi
 
 - Tests with coverage: `uv run pytest --cov` (the gate is 85%)
 - Lint and format check: `uv run ruff check .` and `uv run ruff format --check .`
-- CI runs Python 3.10 (pandas 2) through 3.14 (pandas 3), on Ubuntu and Windows.
+- CI runs Ubuntu on Python 3.10–3.14 and Windows on 3.10 and 3.14. Python 3.10 gets pandas 2, and 3.11+ get pandas 3.
 
 ## Code Review Rules
 
 Report only real problems, and give the failure scenario. Treat these as **P0**:
 - `profiler_core/`, `cleaner_core/` or `config.py` importing `mcp` (the layer boundary)
 - cleaning that mutates its input, overwrites an existing file, or can leave a partial output file
-- tool output that isn't strict JSON (NaN, NaT, numpy types) or doesn't match `profiler_core/schema.py`
+- a cleaning run that writes output although a step failed (nothing is written unless every step succeeds), or a transformation missing from the log (what was done, which column, how many rows were affected)
+- tool output that isn't strict JSON (NaN, ±inf, NaT, numpy types) or doesn't match `profiler_core/schema.py`
+- size, row or XLSX expansion limits that can be bypassed for either input mode (file or inline), or inline output over its cap
 - a path check that can be bypassed (UNC or device paths on Windows, checks done after a filesystem call)
 
 Treat these as **P1**:
 - `print()` anywhere in `src/` (stdout is the JSON-RPC channel over stdio)
-- logic inside `tools/` that belongs in the core, or domain errors not mapped to an actionable tool error
+- logic inside `tools/` that belongs in the core, domain errors not mapped to an actionable tool error, or the core building MCP errors itself
+- any LLM call (the server is deterministic tooling)
 - uncomputed fields omitted or zero-filled instead of `null` (`0` means "checked, none found")
 - behaviour that differs from the analyzer without a row in the spec's Deviations table, or that contradicts the spec
 - code that only works on one of pandas 2 or pandas 3

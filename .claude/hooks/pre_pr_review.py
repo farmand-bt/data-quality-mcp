@@ -2,14 +2,20 @@
 
 Two modes:
   check  PreToolUse hook. Reads the tool call as JSON on stdin. If the
-         command opens a PR and the current HEAD has no review marker,
-         it exits 2, which blocks the call and shows the reason to Claude.
+         command opens a PR for this repository and the current HEAD has no
+         review marker, it exits 2, which blocks the call and shows the
+         reason to Claude.
   mark   Records that HEAD was reviewed. The pre-pr-review skill runs it
          after both reviews are done and their blocking findings are fixed.
 
 Markers live in .git/pre-pr-review/<sha>, so they are never committed. A new
 commit needs a new review before a PR can be opened; later pushes to an
 open PR are not gated.
+
+The hook checks HEAD as it is before the command runs, so a command that
+also moves HEAD or changes directory (`git commit ... && gh pr create`) is
+blocked with a request to run `gh pr create` on its own. PRs for another
+repository (`--repo other/repo`) are outside this gate.
 """
 
 import json
@@ -18,9 +24,47 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Matches the subcommand, not the executable: gh is often called through a
-# variable or its full path ("$GH" pr create, & "...\gh.exe" pr create).
-PR_CREATE = re.compile(r"\bpr\s+create\b")
+# Command position: the start of a line, or after ; & | ( { ` or $(.
+_CMD_START = r"(?:^|[;&|({`\n]|\$\()\s*"
+
+# `<exe> pr create|new` with <exe> in command position, optionally behind
+# PowerShell's & call operator. A mention inside an argument (a commit
+# message, a grep pattern) is not in command position, so it is not matched.
+PR_CREATE = re.compile(
+    _CMD_START + r"(?:&\s*)?"
+    r"(?P<exe>\"[^\"\n]*\"|'[^'\n]*'|\$\{\w+\}|[^\s;&|(){}`\"']+)"
+    r"\s+pr\s+(?:create|new)\b(?P<args>[^;&|\n]*)",
+    re.MULTILINE,
+)
+# gh by name or path (gh, gh.exe, .../GitHub CLI/gh.exe), or a variable
+# holding it ($GH, ${GH}, $GH_BIN).
+GH_EXE = re.compile(r"(?:^|[\\/])gh(?:\.exe)?$|^\$\{?\w*GH\w*\}?$", re.IGNORECASE)
+# Line continuations: bash `\` and PowerShell backtick before a newline.
+CONTINUATION = re.compile(r"[\\`]\r?\n")
+# Commands that change HEAD or the directory before gh would run.
+MOVES_HEAD = re.compile(
+    _CMD_START + r"(?:git\s+(?:commit|switch|checkout|reset|rebase|merge|"
+    r"cherry-pick|am|pull|stash)\b|cd\b|pushd\b|Set-Location\b)",
+    re.MULTILINE | re.IGNORECASE,
+)
+HELP = re.compile(r"(?:^|\s)(?:-h|--help)\b")
+REPO = re.compile(r"(?:^|\s)(?:-R|--repo)[=\s]+[\"']?([^\s\"']+)")
+HEAD = re.compile(r"(?:^|\s)(?:-H|--head)[=\s]+[\"']?([^\s\"']+)")
+
+
+def pr_invocations(command: str) -> list[str]:
+    """The argument strings of every `gh pr create`/`gh pr new` in `command`."""
+    command = CONTINUATION.sub(" ", command)
+    return [
+        m.group("args")
+        for m in PR_CREATE.finditer(command)
+        if GH_EXE.search(m.group("exe").strip("\"'"))
+    ]
+
+
+def opens_pr(command: str) -> bool:
+    """True if `command` runs `gh pr create` (directly, by path or via a variable)."""
+    return bool(pr_invocations(command))
 
 
 def _git(*args: str) -> str:
@@ -35,27 +79,63 @@ def _marker() -> Path:
     )
 
 
+def _this_repo(slug: str) -> bool:
+    """Whether `--repo` names this repository (compared with origin's URL)."""
+    try:
+        origin = _git("remote", "get-url", "origin").lower().removesuffix(".git")
+    except subprocess.CalledProcessError:
+        return True
+    slug = slug.lower().removesuffix(".git").split("github.com/")[-1]
+    return origin.endswith("/" + slug) or origin.endswith(":" + slug)
+
+
+def _block(reason: str) -> int:
+    print(f"Blocked: {reason}", file=sys.stderr)
+    return 2
+
+
 def check() -> int:
     try:
         payload = json.load(sys.stdin)
     except json.JSONDecodeError:
         return 0
     command = (payload.get("tool_input") or {}).get("command") or ""
-    if not PR_CREATE.search(command):
+    gated = []
+    for args in pr_invocations(command):
+        if HELP.search(args):
+            continue
+        repo = REPO.search(args)
+        if repo and not _this_repo(repo.group(1)):
+            continue
+        gated.append(args)
+    if not gated:
         return 0
     try:
         marker = _marker()
+        branch = _git("branch", "--show-current")
     except subprocess.CalledProcessError:
-        return 0  # not in a git repository: nothing to gate
+        return 0  # not in a git repository (or no commits yet): nothing to gate
+    if MOVES_HEAD.search(CONTINUATION.sub(" ", command)):
+        return _block(
+            "this command also commits, switches branches or changes directory, "
+            "so the review check would look at the wrong commit. Run `gh pr "
+            "create` as a command of its own, after the last commit."
+        )
+    for args in gated:
+        head = HEAD.search(args)
+        if head and head.group(1).split(":")[-1] != branch:
+            return _block(
+                f"--head {head.group(1)} is not the checked-out branch "
+                f"({branch or 'detached HEAD'}). Switch to it, run the pre-PR "
+                "review there, then open the PR."
+            )
     if marker.is_file():
         return 0
-    print(
-        f"Blocked: HEAD {marker.name[:7]} has not been through the pre-PR review. "
-        "Run the pre-pr-review skill (standard reviewer + Codex correctness "
-        "review), fix the blocking findings, then open the PR.",
-        file=sys.stderr,
+    return _block(
+        f"HEAD {marker.name[:7]} has not been through the pre-PR review. Run "
+        "the pre-pr-review skill (standard reviewer + Codex correctness "
+        "review), fix the blocking findings, then open the PR."
     )
-    return 2
 
 
 def mark(summary: str) -> int:

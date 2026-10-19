@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre_pr_review.py\" check",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/.claude/hooks/pre_pr_review.py\"; [ -f \"$f\" ] || exit 0; python \"$f\" check",
             "timeout": 15,
             "statusMessage": "Checking pre-PR review"
           }

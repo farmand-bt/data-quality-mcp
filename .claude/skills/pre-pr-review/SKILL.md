@@ -11,24 +11,22 @@ Every PR in this repo goes through two reviewers before it is opened. The PreToo
 
 - Commit all work first. The marker is tied to the HEAD commit, and reviewers read the branch diff.
 - Run `git diff --stat main...HEAD`. Decide whether this is a **spec/docs PR** (only Markdown under `planning/`, `docs/` or the repo root) or a **code PR**.
-- Run `make test` and `make lint` for a code PR. Fix failures before reviewing.
+- Run `make format`, `make test` and `make lint` for a code PR. Fix failures before reviewing.
 
 ## 2. Run both reviewers in parallel
 
-**Standard reviewer (Claude).** Launch the `standard-reviewer` subagent with the Agent tool. Give it the base (`main`), the PR's purpose and title, and, for milestone work, the spec file.
+**Standard reviewer (Claude).** Launch the `standard-reviewer` subagent with the Agent tool. Give it the base (`main`), the PR's purpose and title, and, for milestone work, the spec file. A new agent definition only becomes an Agent type after a session restart. If `standard-reviewer` isn't listed, launch a `general-purpose` agent told to read `.claude/agents/standard-reviewer.md` and follow it exactly.
 
-**Correctness reviewer (Codex).** Find the plugin's companion script, preferring the newest installed version:
+**Correctness reviewer (Codex).** Run it with the Bash tool and `run_in_background: true`, because a review can take several minutes. Use one command: shell variables don't survive between Bash calls. That command finds the newest installed plugin script and fails clearly if there is none:
 
 ```bash
-CODEX=$(ls -d "$HOME"/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs 2>/dev/null | sort -V | tail -1)
+CODEX=$(ls -d "$HOME"/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs 2>/dev/null | sort -V | tail -1); [ -n "$CODEX" ] || { echo "Codex plugin not found" >&2; exit 1; }; node "$CODEX" review --base main --scope branch --wait
 ```
 
-Run it with the Bash tool and `run_in_background: true`, because a review can take several minutes:
+- **Code PR:** the command above.
+- **Spec/docs PR:** replace the last part with `node "$CODEX" adversarial-review --base main --scope branch --wait "<focus: the decisions to challenge, internal contradictions, rules that can't be implemented as written>"`.
 
-- **Code PR:** `node "$CODEX" review --base main --scope branch --wait`
-- **Spec/docs PR:** `node "$CODEX" adversarial-review --base main --scope branch --wait "<focus: the decisions to challenge, internal contradictions, rules that can't be implemented as written>"`
-
-Codex reads `AGENTS.md`, which holds its review rules. If `$CODEX` is empty or Codex reports it isn't installed or logged in, tell the user and ask whether to continue with the standard reviewer only. Never mark a commit as reviewed by both when only one review ran.
+Codex reads `AGENTS.md`, which holds its review rules. If the plugin isn't found, or Codex reports it isn't installed or logged in, tell the user and ask whether to continue with the standard reviewer only. Never mark a commit as reviewed by both when only one review ran.
 
 ## 3. Triage, once
 
@@ -43,7 +41,7 @@ Codex reads `AGENTS.md`, which holds its review rules. If `$CODEX` is empty or C
 python .claude/hooks/pre_pr_review.py mark "standard: <n> findings, codex: <n> findings, fixed: <n>"
 ```
 
-Then open the PR. Add a short **Pre-PR review** section to its body: what each reviewer found, what was fixed, and what was left and why.
+Then open the PR with `gh pr create` as a command of its own: the hook blocks it when it's chained with a commit, a branch switch or a `cd`. Add a short **Pre-PR review** section to its body: what each reviewer found, what was fixed, and what was left and why.
 
 ## After the PR is open
 
