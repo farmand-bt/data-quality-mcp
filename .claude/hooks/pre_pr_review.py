@@ -16,10 +16,15 @@ The hook checks HEAD as it is before the command runs, so a command that
 also moves HEAD or changes directory (`git commit ... && gh pr create`) is
 blocked with a request to run `gh pr create` on its own. PRs for another
 repository (`--repo other/repo`) are outside this gate.
+
+Detection is a best-effort guard rail for Claude's own commands, not a
+security boundary: indirect forms such as `bash -c '...'`, `env gh ...` or
+`gh api .../pulls` are not recognised.
 """
 
 import json
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -51,9 +56,26 @@ MOVES_HEAD = re.compile(
     r"|cd\b|pushd\b|Set-Location\b)",
     re.MULTILINE | re.IGNORECASE,
 )
-HELP = re.compile(r"(?:^|\s)(?:-h|--help)\b")
-REPO = re.compile(r"(?:^|\s)(?:-R|--repo)[=\s]+[\"']?([^\s\"']+)")
-HEAD = re.compile(r"(?:^|\s)(?:-H|--head)[=\s]+[\"']?([^\s\"']+)")
+
+
+def _flags(args: str) -> dict[str, str]:
+    """`help`, `repo` and `head` from gh's arguments, read from shell tokens so
+    text inside a quoted --title or --body never counts as a flag. Arguments
+    that can't be tokenized give {}, which keeps the PR gated."""
+    try:
+        tokens = shlex.split(args)
+    except ValueError:
+        return {}
+    flags: dict[str, str] = {}
+    for i, token in enumerate(tokens):
+        if token in ("-h", "--help"):
+            flags["help"] = ""
+        for name, short in (("repo", "-R"), ("head", "-H")):
+            if token in (short, f"--{name}") and i + 1 < len(tokens):
+                flags[name] = tokens[i + 1]
+            elif token.startswith(f"--{name}="):
+                flags[name] = token.split("=", 1)[1]
+    return flags
 
 
 def pr_invocations(command: str) -> list[str]:
@@ -106,12 +128,12 @@ def check() -> int:
     command = (payload.get("tool_input") or {}).get("command") or ""
     gated = []
     for args in pr_invocations(command):
-        if HELP.search(args):
+        flags = _flags(args)
+        if "help" in flags:
             continue
-        repo = REPO.search(args)
-        if repo and not _this_repo(repo.group(1)):
+        if "repo" in flags and not _this_repo(flags["repo"]):
             continue
-        gated.append(args)
+        gated.append(flags)
     if not gated:
         return 0
     try:
@@ -125,11 +147,11 @@ def check() -> int:
             "so the review check would look at the wrong commit. Run `gh pr "
             "create` as a command of its own, after the last commit."
         )
-    for args in gated:
-        head = HEAD.search(args)
-        if head and head.group(1).split(":")[-1] != branch:
+    for flags in gated:
+        head = flags.get("head")
+        if head and head.split(":")[-1] != branch:
             return _block(
-                f"--head {head.group(1)} is not the checked-out branch "
+                f"--head {head} is not the checked-out branch "
                 f"({branch or 'detached HEAD'}). Switch to it, run the pre-PR "
                 "review there, then open the PR."
             )

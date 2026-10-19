@@ -127,6 +127,18 @@ def test_help_is_not_gated(repo):
 @pytest.mark.parametrize(
     "command",
     [
+        'gh pr create -t "fix -h handling"',
+        "gh pr create -t x --body 'see -R other/repo and --head other'",
+        'gh pr create -t "unbalanced',  # can't be tokenized: stays gated
+    ],
+)
+def test_flags_inside_quoted_text_do_not_bypass_the_gate(repo, command):
+    assert _run(repo, "check", stdin=_payload(command)).returncode == 2
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
         'git commit -qm "fix" && gh pr create -t x',
         "git switch other && gh pr create -t x",
         "cd ../other && gh pr create -t x",
