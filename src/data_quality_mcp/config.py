@@ -8,6 +8,18 @@ touching the core. This module must stay free of any `mcp` import.
 # --- Resource limits (enforced by profiler_core.loader) ---
 MAX_FILE_SIZE_MB = 50
 MAX_ROWS = 500_000
+# An XLSX is a zip: cap what it may expand to, and how many entries it may
+# have, before parsing it (shared strings are held in memory in full).
+MAX_XLSX_UNCOMPRESSED_MB = 200
+MAX_XLSX_ENTRIES = 1000
+# UNC and device paths (\\server\share, \\?\, \\.\) are rejected on Windows:
+# opening one connects to that host over SMB and can leak NTLM credentials.
+ALLOW_NETWORK_PATHS = False
+
+# --- Cleaning (cleaner_core) ---
+MAX_CLEANING_STEPS = 50
+MAX_INLINE_OUTPUT_MB = 1  # Inline output goes into the model's context
+CLEANED_SUFFIX = "_cleaned"  # <stem>_cleaned.<ext>, then _cleaned_2, ...
 
 # --- Profiling thresholds ---
 MISSING_THRESHOLD = 0.30  # Column warning when more than this fraction is missing
