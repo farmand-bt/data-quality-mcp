@@ -111,16 +111,20 @@ data-quality-mcp/
 │       │   ├── recommendations.py   # Added Milestone 2
 │       │   └── report.py            # Aggregates everything into the unified schema
 │       │
-│       ├── cleaner_core/            # Vendored + simplified cleaning engine (added Milestone 3)
+│       ├── cleaner_core/            # Cleaning engine ported from the analyzer (Milestone 3)
 │       │   ├── __init__.py
+│       │   ├── schema.py            # Step TypedDicts (the tool's input contract)
 │       │   ├── missing_handler.py
 │       │   ├── duplicate_handler.py
 │       │   ├── type_fixer.py
 │       │   ├── outlier_handler.py
-│       │   └── pipeline.py
+│       │   ├── pipeline.py          # Validation, step order, log
+│       │   ├── writer.py            # Serialisation, output naming, exclusive-create writes
+│       │   └── cleaning.py          # run_cleaning: the single entry point the tool calls
 │       │
 │       └── tools/                   # Thin MCP-facing layer — with server.py, the only code that imports `mcp`
 │           ├── __init__.py
+│           ├── inputs.py            # Shared argument types (file_path / inline_content / ...)
 │           ├── profiling_tools.py   # Plain functions + register(app: MCPServer)
 │           ├── cleaning_tools.py    # Added Milestone 3
 │           ├── resources.py         # Added Milestone 2
@@ -132,6 +136,7 @@ data-quality-mcp/
 │   ├── test_loader.py
 │   ├── test_profiler_core.py
 │   ├── test_cleaner_core.py
+│   ├── test_writer.py
 │   ├── test_tools.py
 │   └── fixtures/
 │       ├── clean_sample.csv
@@ -161,7 +166,7 @@ This project is built across 5 milestones — deliberately fewer and lighter tha
 |-----------|---------------------------------------|-------------------------------------------------------------------------------|
 | **1** ✅  | **Scaffolding + Core Profiling** ([spec](milestone-1.md)) | Repo setup, `profiler_core` (types/stats/missing), first tool (`profile_dataset`) over stdio |
 | **2** ✅  | **Expanded Tool Surface** ([spec](milestone-2.md)) | Outliers, duplicates, correlations, recommendations tools; a resource; a prompt |
-| **3**     | **Flexible Input + Cleaning Tools** ([spec](milestone-3.md)) | Inline data support (not just file paths), cleaning tools ported from the cleaner engine |
+| **3** ✅  | **Flexible Input + Cleaning Tools** ([spec](milestone-3.md)) | Inline data support (not just file paths), cleaning tools ported from the cleaner engine |
 | **4**     | **Remote Deployment**                 | Streamable HTTP transport, Docker, minimal auth, a live deployment            |
 | **5**     | **Polish & Docs**                     | README with connection guides, full test pass, optional MCP registry listing  |
 
@@ -169,7 +174,7 @@ This project is built across 5 milestones — deliberately fewer and lighter tha
 - **The core/tools boundary is the single most important structural decision in this project.** `profiler_core/`, `cleaner_core/`, and `config.py` must never import anything from `mcp`. They should be plain, testable Python that could be reused outside an MCP context. Only `tools/` and `server.py` touch the MCP SDK — this keeps the core logic transport-agnostic ahead of Milestone 4, when a second transport (HTTP) is added alongside stdio.
 - **Registration pattern (avoids circular imports and keeps the boundary clean):** each `tools/*.py` module defines plain functions plus a `register(app: MCPServer) -> None` function that registers them. `server.py` creates the app, calls each module's `register(app)`, and runs it. Tool modules never import a global app object from `server.py`.
 - **The boundary is enforced by a test, not by review alone:** `tests/test_architecture.py` walks `profiler_core/` and `cleaner_core/` (and `config.py`) and fails on any `import mcp` / `from mcp`.
-- `profiler_core/loader.py` should be designed from Milestone 1 to accept either a `file_path` or `inline_content` (even though only `file_path` is wired to a tool until Milestone 3). Retrofitting this later would mean touching every tool signature.
+- `profiler_core/loader.py` was designed from Milestone 1 to accept either a `file_path` or `inline_content`, so the tools could gain inline input in Milestone 3 without a redesign. Inline CSV is plain text and inline XLSX is base64 (see Dual Input Mode).
 - Every tool's docstring and type hints matter more here than in a typical project — the SDK's `MCPServer` derives the schema and description an agent sees directly from them. Write them as if a language model, not a human, is the only reader.
 
 ---
@@ -183,7 +188,7 @@ This project is built across 5 milestones — deliberately fewer and lighter tha
 {
     "dataset": {
         "name": "sales.csv",
-        "source": "file_path",       # or "inline_content" (from Milestone 3)
+        "source": "file_path",       # or "inline_content"
         "rows": 1000,
         "columns": 8,
         "quality_score": 82,          # 0–100 composite score
@@ -225,6 +230,24 @@ This project is built across 5 milestones — deliberately fewer and lighter tha
 }
 ```
 
+`clean_dataset` returns a `CleaningResult` (defined in the same file). Its step input types are in `cleaner_core/schema.py`. The figures below are the real results of the six-step plan in [milestone-3.md](milestone-3.md#schema-changes-proposed) on the messy sample:
+
+```python
+{
+    "dataset": {"name": "messy_sample.csv", "source": "file_path", "rows": 520, "columns": 10},
+    "output": {"path": "C:\\data\\messy_sample_cleaned.csv", "content": None,  # content: inline input
+               "format": "csv", "rows": 487, "columns": 10},
+    "before": {"rows": 520, "columns": 10, "missing_cells": 248, "exact_duplicates": 19,
+               "quality_score": 77, "quality_grade": "C"},
+    "after":  {"rows": 487, "columns": 10, "missing_cells": 202, "exact_duplicates": 0,
+               "quality_score": 86, "quality_grade": "B"},  # profiled from the written file
+    "log": [{"action": "fix_type", "column": "sqft", "strategy": "to_numeric",
+             "rows_before": 520, "rows_after": 520, "rows_removed": 0, "values_nulled": 11,
+             "original_dtype": "str", "new_dtype": "float64",
+             "missing_before": None, "missing_after": None, "outliers_treated": None}, ...]
+}
+```
+
 ### JSON-Safe Output
 pandas/numpy values (`np.int64`, `np.float64`, `np.bool_`, `NaN`, `NaT`, `pd.Timestamp`) are not JSON-serializable, or serialize incorrectly (`NaN` is not valid JSON). `report.py` is responsible for guaranteeing that everything it returns is native Python (`int`, `float`, `bool`, `str`, `None`, `list`, `dict`), with `NaN`/`NaT` → `None` and timestamps → ISO strings. A test asserts `json.dumps(report, allow_nan=False)` succeeds on the messy fixture.
 
@@ -241,13 +264,16 @@ Over stdio, stdout *is* the JSON-RPC channel — any stray `print()` corrupts th
 `quality_score` (0–100) and `quality_grade` must come from a deterministic, documented formula — not an ad-hoc one invented during implementation. In Milestone 1 only completeness (missing values) and type consistency (type mismatches) are available, so the formula should be a weighted-penalty model over those components, designed so later components (duplicates, outliers) can be added in Milestone 2 without changing its shape. The formula and weights were approved in Milestone 1, completed in Milestone 2, and are documented in [`docs/architecture.md`](../docs/architecture.md#quality-score) and served as `dataquality://docs/quality-score`. Grades map from score via `QUALITY_GRADE_THRESHOLDS`.
 
 ### Dual Input Mode
-Tools need to work both when the server runs locally over stdio (where reading a file path on disk is natural) and when it's deployed remotely over HTTP (where the server has no access to the caller's filesystem, so the caller must send the data itself). `loader.py` should accept `file_path: str | None` and `inline_content: str | None` (base64-encoded) from the start, even though the inline path isn't exercised by a real tool until Milestone 3.
+Tools need to work both when the server runs locally over stdio (where reading a file path on disk is natural) and when it's deployed remotely over HTTP (where the server has no access to the caller's filesystem, so the caller must send the data itself). Since Milestone 3 every tool accepts `file_path`, or `inline_content` plus `filename_hint`, whose extension sets the format. **CSV is sent as plain text and XLSX as base64**: a model can't reliably produce base64 without a code tool, and CSV text costs about a third fewer tokens (milestone-3.md, D2). `clean_dataset` returns its output the same way the input came in. On Windows, network and device paths are rejected for both input and output.
 
 ### No LLM Dependency
 This server does not call an LLM at any point. It's intentionally pure, deterministic tooling — the reasoning happens in whatever agent calls it. This is a deliberate contrast to your other two projects and worth calling out explicitly in the README: not every AI-adjacent project needs to call a model directly.
 
 ### Non-Destructive, Logged Cleaning
-Carried over from the Data Quality Analyzer: cleaning tools (Milestone 3) never mutate in place, and every transformation is logged with what was done, to which column, and how many rows were affected.
+Carried over from the Data Quality Analyzer, and tightened in Milestone 3:
+- Cleaning never mutates its input, never overwrites an existing file, and never leaves a partial output file.
+- Every transformation is logged with what was done, to which column, and how many rows were affected.
+- Nothing is written unless every step succeeds.
 
 ### PR-Gated Workflow and CI
 Every change (feature, fix, refactor, docs) goes through a branch and a PR. The `main protection` ruleset requires a PR and the required CI checks (Lint, Test, Build, Security and Commitlint jobs), and blocks force pushes and branch deletion. The repo allows squash merge only and deletes merged branches automatically. The repository admin (the owner) is a bypass actor, so a deliberate direct push or force push is still possible. Claude sessions and Dependabot always go through PRs. Because the PR title becomes the squash commit message, commitlint checks the PR title. If the test matrix or a job name changes, the ruleset's required-check list must be updated too.

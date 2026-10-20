@@ -1,6 +1,6 @@
 # Milestone 3: Flexible Input + Cleaning Tools
 
-> **Status: proposed.** This spec is reviewed and merged before any implementation starts.
+> **Status: complete.** The spec was approved in PR #8 and implemented on `feat/milestone-3`. See **As built** at the end for figures and small differences.
 > Shared context (architecture, report schema, design decisions) is in [project-overview.md](project-overview.md). Where this spec changes a decision recorded there (inline encoding, D2), **this spec wins** until the implementation PR updates the overview. The previous milestones are [milestone-1.md](milestone-1.md) and [milestone-2.md](milestone-2.md).
 
 **Goal:** Let every tool take the data inline instead of a file path, and add cleaning: one tool that applies a list of cleaning steps, ported from the analyzer's `cleaner/`, and reports what changed.
@@ -193,3 +193,22 @@ Merging this spec also approves one change to `CLAUDE.md`. The cleaning rule und
 **CI / ruleset:** no new workflows or job names, so the ruleset's required checks don't change.
 
 **PR title / squash commit message:** `feat: inline data input and clean_dataset tool`
+
+---
+
+## As built
+
+- **Figures:** the six-step plan reproduces exactly:
+  - 520 → 487 rows, and `values_nulled = 11` for `sqft`
+  - 77 (C) → 86 (B) as CSV and 88 (B) as XLSX
+  - the log as shown under Schema changes
+  - `profile_dataset` on the written file also reports 86 (B)
+- **Performance:** at 500,000 rows × 10 columns (a 23 MB CSV), `clean_dataset` takes about 7 s, covering the load, two reports, five steps, serialisation and the reload. `profile_dataset` alone takes about 3 s.
+- **Small addition to D2:** a single-line CSV payload that is valid base64 and decodes to multi-line text is rejected with "send CSV as plain text". That is the format inline CSV used before this milestone, and without the check it would parse silently as a one-column table.
+- **Layering:** the step TypedDicts in `cleaner_core/schema.py` form a plain union. The Pydantic discriminator annotation is added in `tools/inputs.py`, so the core needs no schema library. Shared tool argument types live in `tools/inputs.py`.
+- **Handlers** raise the domain `InvalidInputError` for unknown strategies, where the analyzer raises `ValueError`. The schema makes these unreachable from the tool; the parity tests are adapted for it.
+- **Type-dependent checks run at step time:** `fill_mean`/`fill_median` check the column's *current* type, so `fix_type` to numeric followed by `fill_median` on the same column works in one call. Outlier steps still require detection on the input (D5, D6).
+- **CSV output** uses `\n` line endings on every OS, for deterministic output.
+- **Known pandas 2 warning:** filling a boolean `object` column triggers pandas 2's `FutureWarning` about downcasting. This comes from the analyzer's `fillna` call, ported as is, and is harmless.
+- **Tests:** 409 pass on Python 3.12 / pandas 3 and on Python 3.10 / pandas 2, with 98% coverage. They include the analyzer's cleaner tests in `TestAnalyzerParity*` classes, the three bug fixes, every D6 rule, the writer guarantees and inline input.
+- **Version:** 0.3.0.
