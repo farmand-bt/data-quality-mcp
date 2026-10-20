@@ -6,7 +6,18 @@ from typing import Annotated
 from pydantic import Field
 
 from data_quality_mcp import config
-from data_quality_mcp.cleaner_core.schema import CleaningStep
+from data_quality_mcp.cleaner_core.schema import (
+    CleaningStep,
+    FixTypeStep,
+    HandleMissingStep,
+    HandleOutliersStep,
+    RemoveDuplicatesStep,
+)
+
+# Publish and enforce "no unknown keys" (additionalProperties: false). Pydantic
+# would otherwise drop them silently; the core rejects them too, for direct calls.
+for _step in (HandleMissingStep, RemoveDuplicatesStep, FixTypeStep, HandleOutliersStep):
+    _step.__pydantic_config__ = {"extra": "forbid"}
 
 FilePath = Annotated[
     str | None,

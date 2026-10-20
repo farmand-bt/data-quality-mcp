@@ -186,7 +186,7 @@ Merging this spec also approves one change to `CLAUDE.md`. The cleaning rule und
 11. **Verify end-to-end:**
     - MCP Inspector: five tools, the plan above on the messy example, inline input.
     - Claude Desktop (after `uv tool install --editable . --reinstall`): profile, then clean, then profile the output.
-12. **Port back to the analyzer** after this merges, as a separate PR there: the pipeline row-label fix, the `fill_mean` / `fill_median` guard, and the before/after duplicates metric in the UI.
+12. **Port back to the analyzer** after this merges, as a separate PR there: the pipeline row-label fix, the `fill_mean` / `fill_median` guard, the before/after duplicates metric in the UI, and the categorical `fill_constant` fix (see As built).
 
 **Out of scope:** the profiling additions in D9 (separate spec after M3), HTTP transport and switching `file_path` off (M4), near-duplicate removal (the analyzer has no handler for it), and a dry-run mode (the output never replaces anything, so a preview would just be the same call).
 
@@ -210,5 +210,16 @@ Merging this spec also approves one change to `CLAUDE.md`. The cleaning rule und
 - **Type-dependent checks run at step time:** `fill_mean`/`fill_median` check the column's *current* type, so `fix_type` to numeric followed by `fill_median` on the same column works in one call. Outlier steps still require detection on the input (D5, D6).
 - **CSV output** uses `\n` line endings on every OS, for deterministic output.
 - **Known pandas 2 warning:** filling a boolean `object` column triggers pandas 2's `FutureWarning` about downcasting. This comes from the analyzer's `fillna` call, ported as is, and is harmless.
-- **Tests:** 409 pass on Python 3.12 / pandas 3 and on Python 3.10 / pandas 2, with 98% coverage. They include the analyzer's cleaner tests in `TestAnalyzerParity*` classes, the three bug fixes, every D6 rule, the writer guarantees and inline input.
+- **Fixes from the pre-PR review** (standard reviewer and Codex):
+  - **Outlier gate:** outlier steps use exactly `detect_outliers`' gate, i.e. numeric/mixed inferred type and then detection. Before, a datetime column or a text column holding a few numbers was accepted, and `cap_iqr` turned dates into epoch integers.
+  - **Path check:** it also rejects the NT prefix `\??\`. `\??\UNC\server\share` would otherwise reach the SMB redirector.
+  - **Unknown and missing step keys** are errors, for example `column` on `remove_duplicates` or a misspelt `method`. The published schema says `additionalProperties: false` (set in `tools/inputs.py`), and the core checks keys too, for direct calls.
+  - **`fill_constant`** rejects empty or whitespace-only strings, as the analyzer's panel does. They would be written as empty cells and read back as missing.
+  - **Deviation:** `fill_constant` on a categorical column adds the value as a new category first. The analyzer raises `TypeError` here; port back.
+  - **Error mapping:** a pandas `TypeError`/`ValueError` inside a step becomes an actionable error naming the step.
+  - **Reload message:** when an XLSX output is too large to read back, the error points at the output format.
+- **Two smaller unlisted differences:**
+  - The analyzer's panel doesn't offer `fix_type` → `boolean`, although its `type_fixer` supports it. Here it is a normal target type.
+  - `cap_iqr` with fewer than 4 finite values is an error. The analyzer would clip with NaN fences, which does nothing.
+- **Tests:** 425 pass on Python 3.12 / pandas 3 and on Python 3.10 / pandas 2, with 98% coverage. They include the analyzer's cleaner tests in `TestAnalyzerParity*` classes, the three bug fixes, every D6 rule, the writer guarantees and inline input.
 - **Version:** 0.3.0.

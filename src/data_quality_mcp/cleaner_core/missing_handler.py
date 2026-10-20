@@ -63,6 +63,12 @@ def handle_missing(
             out[column] = out[column].fillna(mode.iloc[0])
 
     elif strategy == "fill_constant":
+        # Deviation: a categorical column only accepts known labels, so add the
+        # fill value first (the analyzer raises TypeError here)
+        if isinstance(out[column].dtype, pd.CategoricalDtype) and (
+            value not in out[column].cat.categories
+        ):
+            out[column] = out[column].cat.add_categories([value])
         out[column] = out[column].fillna(value)
 
     elif strategy == "ffill":

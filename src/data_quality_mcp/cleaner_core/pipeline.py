@@ -21,7 +21,13 @@ from data_quality_mcp import config
 from data_quality_mcp.cleaner_core.duplicate_handler import remove_duplicates
 from data_quality_mcp.cleaner_core.missing_handler import handle_missing
 from data_quality_mcp.cleaner_core.outlier_handler import handle_outliers
-from data_quality_mcp.cleaner_core.schema import CleaningStep
+from data_quality_mcp.cleaner_core.schema import (
+    CleaningStep,
+    FixTypeStep,
+    HandleMissingStep,
+    HandleOutliersStep,
+    RemoveDuplicatesStep,
+)
 from data_quality_mcp.cleaner_core.type_fixer import fix_types
 from data_quality_mcp.profiler_core.exceptions import InvalidInputError
 from data_quality_mcp.profiler_core.outliers import detect_column_outliers
@@ -43,6 +49,12 @@ _LOG_FIELDS = (
     "outliers_treated",
 )
 _MIN_FINITE_FOR_FENCES = 4
+_STEP_TYPES = {
+    "handle_missing": HandleMissingStep,
+    "remove_duplicates": RemoveDuplicatesStep,
+    "fix_type": FixTypeStep,
+    "handle_outliers": HandleOutliersStep,
+}
 
 
 def step_priority(step: CleaningStep) -> int:
@@ -78,7 +90,16 @@ def run_steps(
     log: list[CleaningLogEntry] = []
     for step in sorted(steps, key=step_priority):  # stable: keeps caller order
         before = out
-        out, raw = _apply(out, step, outlier_rows, iqr_multiplier)
+        try:
+            out, raw = _apply(out, step, outlier_rows, iqr_multiplier)
+        except (TypeError, ValueError) as exc:
+            # pandas rejecting an operation on this column's dtype: tell the
+            # caller which step failed instead of a generic tool crash
+            target = f" on '{step['column']}'" if "column" in step else ""
+            raise InvalidInputError(
+                f"The {step['action']} step{target} failed ({exc}). Try another "
+                "strategy, or a fix_type step first."
+            ) from exc
         log.append(_log_entry(raw, before, out))
     if len(out) == 0 or len(out.columns) == 0:
         raise InvalidInputError(
@@ -110,6 +131,7 @@ def _validate(
     outlier_rows: dict[str, dict[str, list[int]]] = {}
 
     for step in steps:
+        _validate_keys(step)
         action = step["action"]
         if action == "remove_duplicates":
             if ("remove_duplicates", "") in seen:
@@ -145,12 +167,19 @@ def _validate(
                     "cap_iqr always clips to the IQR fences, so method 'zscore' "
                     "has no effect with it. Omit 'method' or use 'iqr'."
                 )
-            info = detect_column_outliers(
-                df[column],
-                len(df),
-                iqr_multiplier=iqr_multiplier,
-                zscore_threshold=zscore_threshold,
-                max_indices=len(df),
+            # The same gate as profiler_core.outliers.detect_outliers, so a step
+            # is accepted exactly where detect_outliers reports a result
+            inferred, _ = infer_type(df[column])
+            info = (
+                detect_column_outliers(
+                    df[column],
+                    len(df),
+                    iqr_multiplier=iqr_multiplier,
+                    zscore_threshold=zscore_threshold,
+                    max_indices=len(df),
+                )
+                if inferred in ("numeric", "mixed")
+                else None
             )
             if info is None:
                 raise InvalidInputError(
@@ -167,6 +196,31 @@ def _validate(
     return outlier_rows
 
 
+def _validate_keys(step: CleaningStep) -> None:
+    """Unknown keys are an error, not silently ignored: a `column` on
+    remove_duplicates or a misspelt `method` would otherwise change the result
+    without a word (D6: an option with no effect is an error)."""
+    shape = _STEP_TYPES.get(step.get("action"))
+    if shape is None:
+        raise InvalidInputError(
+            f"Unknown action {step.get('action')!r}. Use one of: "
+            + ", ".join(_STEP_TYPES)
+            + "."
+        )
+    allowed = shape.__required_keys__ | shape.__optional_keys__
+    unknown = sorted(set(step) - allowed)
+    if unknown:
+        raise InvalidInputError(
+            f"{step['action']} doesn't take {', '.join(map(repr, unknown))}. "
+            f"Its keys are: {', '.join(sorted(allowed))}."
+        )
+    missing = sorted(shape.__required_keys__ - set(step))
+    if missing:
+        raise InvalidInputError(
+            f"{step['action']} needs {', '.join(map(repr, missing))}."
+        )
+
+
 def _validate_value(step: CleaningStep) -> None:
     has_value = step.get("value") is not None
     if step["strategy"] == "fill_constant":
@@ -176,6 +230,11 @@ def _validate_value(step: CleaningStep) -> None:
                 "with null would change nothing)."
             )
         value = step["value"]
+        if isinstance(value, str) and not value.strip():
+            raise InvalidInputError(
+                "fill_constant's 'value' is empty. An empty string is written "
+                "as an empty cell, which reads back as missing; give a real value."
+            )
         if isinstance(value, float) and not math.isfinite(value):
             raise InvalidInputError(
                 "fill_constant's 'value' must be a finite number, not NaN or Infinity."

@@ -465,6 +465,62 @@ def test_static_validation(df_with_missing, steps, message):
         run_steps(df_with_missing, steps)
 
 
+@pytest.mark.parametrize(
+    "column",
+    [
+        pd.to_datetime(
+            pd.Series(
+                ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04", "2030-01-01"]
+            )
+        ),
+        pd.Series(
+            ["1", "2", "3", "4", "999", "a", "b", "c", "d", "e"]
+        ),  # text with numbers
+    ],
+)
+def test_outlier_steps_only_where_detect_outliers_reports_a_result(column):
+    # standard pre-PR review: the gate must match detect_outliers exactly
+    df = pd.DataFrame({"c": column})
+    for strategy in ("remove", "cap_iqr"):
+        step = {"action": "handle_outliers", "column": "c", "strategy": strategy}
+        with pytest.raises(InvalidInputError, match="doesn't apply"):
+            run_steps(df, [step])
+
+
+@pytest.mark.parametrize(
+    ("step", "message"),
+    [
+        ({"action": "remove_duplicates", "column": "x"}, "doesn't take 'column'"),
+        (
+            {
+                "action": "handle_outliers",
+                "column": "x",
+                "strategy": "remove",
+                "methd": "zscore",
+            },
+            "doesn't take 'methd'",
+        ),
+        ({"action": "fix_type", "column": "x"}, "needs 'target_type'"),
+        ({"action": "explode"}, "Unknown action"),
+    ],
+)
+def test_unknown_and_missing_keys_are_errors(df_with_missing, step, message):
+    with pytest.raises(InvalidInputError, match=message):
+        run_steps(df_with_missing, [step])
+
+
+@pytest.mark.parametrize("value", ["", "   "])
+def test_fill_constant_rejects_empty_strings(df_with_missing, value):
+    step = {
+        "action": "handle_missing",
+        "column": "cat",
+        "strategy": "fill_constant",
+        "value": value,
+    }
+    with pytest.raises(InvalidInputError, match="empty"):
+        run_steps(df_with_missing, [step])
+
+
 def test_outlier_step_on_a_column_that_only_becomes_numeric_later():
     df = pd.DataFrame({"p": ["$1,200", "$1,300", "$1,250", "$1,100", "$9,999"]})
     steps = [
@@ -551,6 +607,47 @@ def test_fill_constant_converts_the_value(column, value, expected):
     }
     out, _ = run_steps(df, [step])
     assert out["c"].iloc[1] == expected
+
+
+def test_fill_constant_with_a_new_label_on_a_categorical_column():
+    # Codex pre-PR review: pandas' Categorical.fillna rejects unknown labels
+    df = pd.DataFrame({"c": ["a", "b", None, "a"]})
+    steps = [
+        {"action": "fix_type", "column": "c", "target_type": "categorical"},
+        {
+            "action": "handle_missing",
+            "column": "c",
+            "strategy": "fill_constant",
+            "value": "unknown",
+        },
+    ]
+    out, _ = run_steps(df, steps)
+    assert out["c"].tolist() == ["a", "b", "unknown", "a"]
+    assert isinstance(out["c"].dtype, pd.CategoricalDtype)
+
+
+def test_numeric_fill_on_a_mixed_string_column():
+    # pandas 3 stores this as `str`; fillna with a number must still work
+    df = pd.DataFrame({"p": ["1.5", "2", "x", None, "4", "5"]})
+    out, _ = run_steps(
+        df, [{"action": "handle_missing", "column": "p", "strategy": "fill_mean"}]
+    )
+    assert out["p"].iloc[3] == pytest.approx(3.125)
+    assert (
+        out["p"].iloc[2] == "x"
+    )  # non-numeric values are left alone, as in the analyzer
+
+
+def test_pandas_errors_inside_a_step_become_actionable(monkeypatch):
+    from data_quality_mcp.cleaner_core import pipeline
+
+    def broken(*args, **kwargs):
+        raise TypeError("dtype says no")
+
+    monkeypatch.setattr(pipeline, "fix_types", broken)
+    df = pd.DataFrame({"c": ["a", "b"]})
+    with pytest.raises(InvalidInputError, match="fix_type step on 'c' failed"):
+        run_steps(df, [{"action": "fix_type", "column": "c", "target_type": "string"}])
 
 
 def test_fill_mode_on_an_all_null_column_is_a_logged_no_op():
@@ -681,6 +778,19 @@ def test_nothing_is_written_when_a_step_fails(messy_copy):
     with pytest.raises(InvalidInputError):
         run_cleaning(steps, file_path=str(messy_copy))
     assert [p.name for p in messy_copy.parent.iterdir()] == ["messy_sample.csv"]
+
+
+def test_xlsx_output_too_large_to_reload_blames_the_output(messy_copy):
+    from data_quality_mcp.profiler_core.exceptions import OutputWriteError
+
+    with pytest.raises(OutputWriteError, match="Choose a .csv output_path"):
+        run_cleaning(
+            [{"action": "remove_duplicates"}],
+            file_path=str(messy_copy),
+            output_path=str(messy_copy.with_name("out.xlsx")),
+            max_xlsx_uncompressed_mb=0.01,
+        )
+    assert not messy_copy.with_name("out.xlsx").exists()
 
 
 def test_output_path_with_inline_input_is_rejected(tmp_path):

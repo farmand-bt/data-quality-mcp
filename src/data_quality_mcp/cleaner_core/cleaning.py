@@ -16,7 +16,11 @@ from data_quality_mcp.cleaner_core.writer import (
     write_output,
 )
 from data_quality_mcp.cleaner_core.writer import inline_content as encode_inline
-from data_quality_mcp.profiler_core.exceptions import InvalidInputError
+from data_quality_mcp.profiler_core.exceptions import (
+    FileTooLargeError,
+    InvalidInputError,
+    OutputWriteError,
+)
 from data_quality_mcp.profiler_core.json_safe import to_json_safe
 from data_quality_mcp.profiler_core.loader import load_input, parse_bytes
 from data_quality_mcp.profiler_core.report import (
@@ -96,7 +100,13 @@ def run_cleaning(
         content = encode_inline(raw, extension, max_mb=max_inline_output_mb)
 
     del limits["max_file_size_mb"]  # our own output: no size limit on reload
-    reloaded = parse_bytes(raw, extension, **limits)
+    try:
+        reloaded = parse_bytes(raw, extension, **limits)
+    except FileTooLargeError as exc:
+        raise OutputWriteError(
+            f"The cleaned data would be too large as {extension} ({exc}) Choose a "
+            ".csv output_path instead."
+        ) from exc
     after = quality_snapshot(generate_report(reloaded, loaded.name, loaded.source))
 
     if loaded.source == "file_path":  # written last: only once all else succeeded

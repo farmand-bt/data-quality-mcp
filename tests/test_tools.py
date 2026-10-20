@@ -73,6 +73,25 @@ async def test_clean_dataset_schema_and_annotations(client):
     }
     properties = set(tool.output_schema["properties"])
     assert properties == set(CleaningResult.__annotations__)
+    for name in (
+        "HandleMissingStep",
+        "RemoveDuplicatesStep",
+        "FixTypeStep",
+        "HandleOutliersStep",
+    ):
+        assert tool.input_schema["$defs"][name]["additionalProperties"] is False
+
+
+async def test_clean_dataset_schema_rejects_unknown_keys(client, messy_copy: Path):
+    result = await client.call_tool(
+        "clean_dataset",
+        {
+            "steps": [{"action": "remove_duplicates", "column": "id"}],
+            "file_path": str(messy_copy),
+        },
+    )
+    assert result.is_error is True
+    assert [p.name for p in messy_copy.parent.iterdir()] == ["messy_sample.csv"]
 
 
 async def test_profile_dataset_returns_structured_report(client, messy_path: Path):

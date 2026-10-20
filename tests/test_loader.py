@@ -184,6 +184,9 @@ def test_load_input_from_file(messy_path: Path):
         "/\\server\\share\\x.csv",
         "\\\\?\\C:\\data\\x.csv",
         "\\\\.\\pipe\\x",
+        "\\??\\UNC\\server\\share\\x.csv",
+        "/??/UNC/server/share/x.csv",
+        "\\??\\C:\\data\\x.csv",
     ],
 )
 def test_network_and_device_paths_rejected_on_windows(path):
