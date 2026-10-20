@@ -13,17 +13,21 @@ import sys
 from mcp.server import MCPServer
 
 from data_quality_mcp import __version__
-from data_quality_mcp.tools import profiling_tools, prompts, resources
+from data_quality_mcp.tools import cleaning_tools, profiling_tools, prompts, resources
 
 SERVER_NAME = "data-quality"
 
 INSTRUCTIONS = (
-    "Deterministic data quality profiling for CSV and Excel files (read-only; "
-    "always pass absolute file paths). profile_dataset returns the full report: "
-    "quality score and grade, prioritized recommendations, and per-column types, "
-    "type mismatches, missing values, statistics, outliers and warnings, plus "
-    "duplicate rows and correlations. For a narrow question use detect_outliers, "
-    "find_duplicates or analyze_correlations. The resource "
+    "Deterministic data quality profiling and cleaning for CSV and Excel data. "
+    "Pass an absolute file_path, or the data itself as inline_content (CSV as "
+    "plain text, .xlsx as base64) with a filename_hint. profile_dataset returns "
+    "the full report: quality score and grade, prioritized recommendations, and "
+    "per-column types, type mismatches, missing values, statistics, outliers and "
+    "warnings, plus duplicate rows and correlations. For a narrow question use "
+    "detect_outliers, find_duplicates or analyze_correlations; these tools only "
+    "read. clean_dataset applies a list of cleaning steps and writes the result "
+    "to a new file (it never overwrites one) or returns it inline, with a log "
+    "and the quality score before and after. The resource "
     "dataquality://docs/quality-score explains the score, and "
     "dataquality://schema/report is the report's JSON Schema. The "
     "review_data_quality prompt runs a complete review."
@@ -34,6 +38,7 @@ def create_server() -> MCPServer:
     """Build the app and register every tools module on it."""
     app = MCPServer(SERVER_NAME, version=__version__, instructions=INSTRUCTIONS)
     profiling_tools.register(app)
+    cleaning_tools.register(app)
     resources.register(app)
     prompts.register(app)
     return app

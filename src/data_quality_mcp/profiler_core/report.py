@@ -26,6 +26,7 @@ from data_quality_mcp.profiler_core.schema import (
     DuplicateResult,
     OutlierInfo,
     OutlierResult,
+    QualitySnapshot,
 )
 from data_quality_mcp.profiler_core.scoring import compute_quality_score, quality_grade
 from data_quality_mcp.profiler_core.stats import compute_column_stats
@@ -121,12 +122,27 @@ def _unique_column_names(columns: pd.Index) -> list[str]:
     return names
 
 
-def _prepare(df: pd.DataFrame, source: str) -> pd.DataFrame:
+def prepare_frame(df: pd.DataFrame, source: str) -> pd.DataFrame:
     """Validate `source`; return a copy with unique string column names and a
-    0-based RangeIndex, so every reported index is a data-row position."""
+    0-based RangeIndex, so every reported index is a data-row position.
+
+    The cleaner uses this too, so step columns match the report's names."""
     if source not in _SOURCES:
         raise InvalidInputError(f"source must be one of {_SOURCES}, got {source!r}.")
     return df.set_axis(_unique_column_names(df.columns), axis=1).reset_index(drop=True)
+
+
+def quality_snapshot(report: DatasetReport) -> QualitySnapshot:
+    """The headline figures of a report (clean_dataset's before/after)."""
+    dataset = report["dataset"]
+    return {
+        "rows": dataset["rows"],
+        "columns": dataset["columns"],
+        "missing_cells": sum(c["missing_count"] for c in report["columns"].values()),
+        "exact_duplicates": report["duplicates"]["exact_count"],
+        "quality_score": dataset["quality_score"],
+        "quality_grade": dataset["quality_grade"],
+    }
 
 
 def _summary(df: pd.DataFrame, name: str, source: str) -> DatasetSummary:
@@ -144,7 +160,7 @@ def generate_report(
     outlier_warning_pct: float = config.OUTLIER_COLUMN_WARNING_PCT,
 ) -> DatasetReport:
     """Profile `df` and return a JSON-safe report matching `DatasetReport`."""
-    df = _prepare(df, source)
+    df = prepare_frame(df, source)
     type_info = detect_types(df, high_cardinality_threshold=high_cardinality_threshold)
     missing_info = analyze_missing(df)
     outliers = detect_outliers(df, type_info)
@@ -216,7 +232,7 @@ def outlier_report(
     high_cardinality_threshold: float = config.HIGH_CARDINALITY_THRESHOLD,
 ) -> OutlierResult:
     """Dataset summary plus per-column outliers (None where not applicable)."""
-    df = _prepare(df, source)
+    df = prepare_frame(df, source)
     type_info = detect_types(df, high_cardinality_threshold=high_cardinality_threshold)
     return to_json_safe(
         {
@@ -228,7 +244,7 @@ def outlier_report(
 
 def duplicate_report(df: pd.DataFrame, name: str, source: str) -> DuplicateResult:
     """Dataset summary plus exact and near-duplicate rows."""
-    df = _prepare(df, source)
+    df = prepare_frame(df, source)
     return to_json_safe(
         {"dataset": _summary(df, name, source), "duplicates": analyze_duplicates(df)}
     )
@@ -242,7 +258,7 @@ def correlation_report(
     high_cardinality_threshold: float = config.HIGH_CARDINALITY_THRESHOLD,
 ) -> CorrelationResult:
     """Dataset summary plus Pearson / Cramér's V correlations."""
-    df = _prepare(df, source)
+    df = prepare_frame(df, source)
     type_info = detect_types(df, high_cardinality_threshold=high_cardinality_threshold)
     return to_json_safe(
         {

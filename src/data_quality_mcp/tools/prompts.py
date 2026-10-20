@@ -33,7 +33,9 @@ def review_data_quality(
 5. Point out anything that needs a human decision (for example, whether
    near-duplicates or outliers are real data or errors).
 
-Do not modify the file. Keep the review concise and specific to this dataset.
+Do not modify anything yet. If the user agrees to the plan, apply it with
+`clean_dataset`, which writes a new file and never changes the original.
+Keep the review concise and specific to this dataset.
 """
 
 

@@ -1,21 +1,21 @@
 """MCP-facing profiling tools: thin adapters over profiler_core.
 
-Each tool loads the file, calls one core function, and returns its result.
-Domain errors from the core are turned into ToolError, whose message reaches
-the calling agent; any other exception is reported generically by the SDK.
+Each tool loads its input (a file path or inline content), calls one core
+function, and returns its result. Domain errors from the core are turned into
+ToolError, whose message reaches the calling agent; any other exception is
+reported generically by the SDK.
 """
 
 from collections.abc import Callable
-from pathlib import Path
-from typing import Annotated, TypeVar
+from typing import TypeVar
 
 import pandas as pd
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
-from pydantic import Field
 
-from data_quality_mcp.profiler_core import DataQualityError, load_data
+from data_quality_mcp.profiler_core import DataQualityError
+from data_quality_mcp.profiler_core.loader import load_input
 from data_quality_mcp.profiler_core.report import (
     correlation_report,
     duplicate_report,
@@ -28,52 +28,57 @@ from data_quality_mcp.profiler_core.schema import (
     DuplicateResult,
     OutlierResult,
 )
+from data_quality_mcp.tools.inputs import FilenameHint, FilePath, InlineContent
 
 T = TypeVar("T")
 
-FilePath = Annotated[
-    str,
-    Field(
-        description=(
-            "Absolute path to a .csv or .xlsx file on the machine running this "
-            "server, e.g. 'C:\\data\\sales.csv' or '/home/me/data/sales.csv'."
-        )
-    ),
-]
-
 _READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
 
+_INPUT_HELP = """Input: either file_path (an absolute path; relative paths resolve
+    against the server's working directory, which is usually not what you expect) or
+    inline_content plus filename_hint (CSV as plain text, .xlsx as base64; for
+    small data). Supported formats: .csv (comma- or semicolon-separated) and
+    .xlsx (first sheet). Limits: 50 MB and 500,000 rows."""
 
-def _run(file_path: str, build: Callable[[pd.DataFrame, str, str], T]) -> T:
-    """Load `file_path` and pass it to a core report builder, mapping domain
+
+def _run(
+    file_path: str | None,
+    inline_content: str | None,
+    filename_hint: str | None,
+    build: Callable[[pd.DataFrame, str, str], T],
+) -> T:
+    """Load the input and pass it to a core report builder, mapping domain
     errors to ToolError so the agent sees an actionable message."""
     try:
-        df = load_data(file_path=file_path)
-        return build(df, Path(file_path).name, "file_path")
+        loaded = load_input(file_path, inline_content, filename_hint)
+        return build(loaded.df, loaded.name, loaded.source)
     except DataQualityError as exc:
         raise ToolError(str(exc)) from exc
 
 
-def profile_dataset(file_path: FilePath) -> DatasetReport:
+def profile_dataset(
+    file_path: FilePath = None,
+    inline_content: InlineContent = None,
+    filename_hint: FilenameHint = None,
+) -> DatasetReport:
     """Profile a tabular dataset and return a full, structured data quality report.
 
     Use this tool to assess a CSV or Excel file before analyzing, cleaning, or
     modeling it. It covers missing values, type mismatches (e.g. numbers stored
     as text, dates in several formats), per-column statistics, outliers,
     duplicate rows, correlations, prioritized recommendations, and an overall
-    quality score. It only reads the file. The analysis is deterministic. For a
+    quality score. It only reads the data. The analysis is deterministic. For a
     narrow question, the focused tools (detect_outliers, find_duplicates,
-    analyze_correlations) return a smaller result.
+    analyze_correlations) return a smaller result. To fix the issues, use
+    clean_dataset.
 
-    Input: `file_path` must be an absolute path. Relative paths resolve against
-    the server's working directory, which is usually not what you expect.
-    Supported formats: .csv (comma- or semicolon-separated) and .xlsx (first
-    sheet). Limits: 50 MB and 500,000 rows.
+    {input_help}
 
     Output sections:
-    - dataset: name, rows, columns, quality_score (0-100, higher is better) and
-      quality_grade (A >= 90, B >= 80, C >= 70, D >= 60, otherwise F). Read the
-      resource dataquality://docs/quality-score for the exact formula.
+    - dataset: name, source (file_path or inline_content), rows, columns,
+      quality_score (0-100, higher is better) and quality_grade (A >= 90,
+      B >= 80, C >= 70, D >= 60, otherwise F). Read the resource
+      dataquality://docs/quality-score for the exact formula.
     - recommendations: actionable findings sorted critical -> warning -> info,
       each with a category (missing, type, consistency, duplicate, outlier,
       correlation) and a column (null = dataset-level). Start here.
@@ -96,14 +101,19 @@ def profile_dataset(file_path: FilePath) -> DatasetReport:
     Errors: the message says what to fix, e.g. file not found (check the path is
     absolute), unsupported file type, file too large, or unparseable content.
     """
-    return _run(file_path, generate_report)
+    return _run(file_path, inline_content, filename_hint, generate_report)
 
 
-def detect_outliers(file_path: FilePath) -> OutlierResult:
-    """Find outliers in every numeric column of a CSV or Excel file.
+def detect_outliers(
+    file_path: FilePath = None,
+    inline_content: InlineContent = None,
+    filename_hint: FilenameHint = None,
+) -> OutlierResult:
+    """Find outliers in every numeric column of a CSV or Excel dataset.
 
     Use this when you only need outliers; profile_dataset includes the same
-    data plus everything else. Read-only and deterministic.
+    data plus everything else. Read-only and deterministic. These are exactly
+    the rows clean_dataset's handle_outliers step treats.
 
     Methods, per numeric (or mostly numeric) column:
     - IQR (primary): values outside [Q1 - 1.5 x IQR, Q3 + 1.5 x IQR].
@@ -123,14 +133,18 @@ def detect_outliers(file_path: FilePath) -> OutlierResult:
     all rows. *_indices are 0-based data-row positions (CSV line = index + 2),
     sorted and capped at 50; indices_truncated is true when a list was cut.
 
-    Input: an absolute path to a .csv or .xlsx file (50 MB / 500,000 rows max).
+    {input_help}
     Errors explain what to fix (e.g. use an absolute path).
     """
-    return _run(file_path, outlier_report)
+    return _run(file_path, inline_content, filename_hint, outlier_report)
 
 
-def find_duplicates(file_path: FilePath) -> DuplicateResult:
-    """Find exact and near-duplicate rows in a CSV or Excel file.
+def find_duplicates(
+    file_path: FilePath = None,
+    inline_content: InlineContent = None,
+    filename_hint: FilenameHint = None,
+) -> DuplicateResult:
+    """Find exact and near-duplicate rows in a CSV or Excel dataset.
 
     Use this when you only need duplicate analysis; profile_dataset includes the
     same data plus everything else. Read-only and deterministic.
@@ -146,14 +160,18 @@ def find_duplicates(file_path: FilePath) -> DuplicateResult:
     Indices are 0-based data-row positions (CSV line = index + 2), sorted and
     capped at 50; indices_truncated is true when a list was cut.
 
-    Input: an absolute path to a .csv or .xlsx file (50 MB / 500,000 rows max).
+    {input_help}
     Errors explain what to fix (e.g. use an absolute path).
     """
-    return _run(file_path, duplicate_report)
+    return _run(file_path, inline_content, filename_hint, duplicate_report)
 
 
-def analyze_correlations(file_path: FilePath) -> CorrelationResult:
-    """Measure correlations between columns of a CSV or Excel file.
+def analyze_correlations(
+    file_path: FilePath = None,
+    inline_content: InlineContent = None,
+    filename_hint: FilenameHint = None,
+) -> CorrelationResult:
+    """Measure correlations between columns of a CSV or Excel dataset.
 
     Use this to find redundant or strongly related features; profile_dataset
     includes the same data plus everything else. Read-only and deterministic.
@@ -167,10 +185,14 @@ def analyze_correlations(file_path: FilePath) -> CorrelationResult:
     - high_correlation_pairs: pairs with |value| >= 0.9, strongest first, each
       with col_a, col_b, method (pearson or cramers_v) and value.
 
-    Input: an absolute path to a .csv or .xlsx file (50 MB / 500,000 rows max).
+    {input_help}
     Errors explain what to fix (e.g. use an absolute path).
     """
-    return _run(file_path, correlation_report)
+    return _run(file_path, inline_content, filename_hint, correlation_report)
+
+
+for _tool in (profile_dataset, detect_outliers, find_duplicates, analyze_correlations):
+    _tool.__doc__ = _tool.__doc__.replace("{input_help}", _INPUT_HELP)
 
 
 def register(app: MCPServer) -> None:

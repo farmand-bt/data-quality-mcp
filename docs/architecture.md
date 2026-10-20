@@ -10,11 +10,13 @@ server.py           create_server(): builds MCPServer, calls each tools module's
         │
 tools/              thin adapters: validate args, call the core, map domain errors to ToolError
         │
+cleaner_core/       pure Python cleaning engine: handlers, pipeline, writer, run_cleaning.
+        │           Uses profiler_core. Never imports `mcp`.
 profiler_core/      pure Python engine (pandas/numpy): loader, type detection, stats,
 config.py           missing values, report, schema. Never imports `mcp`.
 ```
 
-**The rule:** only `server.py` and `tools/` may import the MCP SDK. `profiler_core/`, `cleaner_core/` (Milestone 3) and `config.py` never do. `tests/test_architecture.py` parses every core file and fails the build if one imports `mcp`. Because of this, adding the HTTP transport in Milestone 4 means adding an entry point, not rewriting the engine.
+**The rule:** only `server.py` and `tools/` may import the MCP SDK. `profiler_core/`, `cleaner_core/` and `config.py` never do. `tests/test_architecture.py` parses every core file and fails the build if one imports `mcp`. Because of this, adding the HTTP transport in Milestone 4 means adding an entry point, not rewriting the engine.
 
 ## Registration pattern
 
@@ -47,7 +49,9 @@ This avoids circular imports. It also lets tests build a fresh server with `crea
 
 ## Consistency with the Data Quality Analyzer
 
-The outlier, duplicate, correlation and recommendation logic is ported from `llm-data-quality-analyzer` with the same methods, thresholds and rules, so both projects give the same answers on the same data. The ported test cases live in the `TestAnalyzerParity` classes. Every deviation, with its reason, is listed in [`planning/milestone-2.md`](../planning/milestone-2.md#deviations-from-the-analyzer).
+The outlier, duplicate, correlation and recommendation logic and the cleaning handlers are ported from `llm-data-quality-analyzer` with the same methods, thresholds and rules, so both projects give the same answers on the same data. The ported test cases live in the `TestAnalyzerParity` classes. Every deviation, with its reason, is listed in the milestone specs:
+- [`planning/milestone-2.md`](../planning/milestone-2.md#deviations-from-the-analyzer) for profiling
+- [`planning/milestone-3.md`](../planning/milestone-3.md#deviations-from-the-analyzer) for cleaning
 
 ## Errors
 
@@ -92,17 +96,66 @@ The analyzer's "+5 clean-column bonus" was dropped in Milestone 1, because it co
   - near-duplicates: rows identical on all columns but one, excluding exact duplicates, skipped above 50 columns. They're reported but not scored. Each cell is hashed once, and a row's "all columns but one" key is the wrapping sum of its column hashes minus one term, so each column needs only one cheap uint64 pass. Hash matches are confirmed on the real values, so the result is exactly the analyzer's definition (a randomized test checks this). At the limits (500k rows × 50 columns), this takes about 1.6 s, compared with 21.6 s for the per-column full-row passes.
 - **Correlations:** Pearson over the first 50 numeric columns, and Cramér's V (`scipy` χ², no bias correction) over the first 15 categorical/boolean columns with at most 50 distinct values. Pairs with |value| ≥ 0.9 are listed strongest first.
 
+## Input
+
+Every tool takes `file_path`, or `inline_content` plus `filename_hint`. Both go through `loader.load_input`:
+- **Inline formats:** CSV is plain text and XLSX is base64. A single-line base64 payload sent as CSV is rejected with a hint, so a client using the old format gets an error rather than a one-column parse.
+- **Limits:** 50 MB and 500,000 rows. For XLSX, the zip is also checked before parsing: at most 200 MB unpacked and 1,000 entries. Python's `zipfile` stops at each entry's declared size, so the declared total bounds memory.
+- **Paths:** on Windows, UNC and device paths are rejected on the raw string before any filesystem call (`profiler_core/paths.py`), because even a stat on `\\host\share` connects to that host. `config.ALLOW_NETWORK_PATHS` opts back in.
+
+## Cleaning
+
+`clean_dataset` passes its arguments to `cleaner_core.run_cleaning`, which works in this order:
+
+1. **Path checks** that need no I/O.
+2. **Load**, then `prepare_frame` (the report's column names and a 0-based index).
+3. **`before`**, from `generate_report`.
+4. **Validate and run** the steps (`pipeline.run_steps`).
+5. **Serialise** in memory.
+6. **`after`**, from the serialised bytes loaded back, so it equals `profile_dataset` on the output.
+7. **Write** the file last, or return the content inline.
+
+Nothing is written unless every earlier stage succeeded.
+
+- **Handlers** (`missing_handler`, `duplicate_handler`, `type_fixer`, `outlier_handler`) are the analyzer's, with a `reset_index` switch.
+- **Step order** is the analyzer's stable priority: type fixes, fills, `cap_iqr` and `replace_nan` first, then outlier `remove`, then `drop_rows`, `drop_column` and `remove_duplicates`. Outlier rows are computed on the input by the report's own function, uncapped. Original row labels are kept until every step has run, so two outlier removals both hit the right rows.
+- **Validation.** Static rules are checked before the first step runs:
+  - the column exists
+  - at most one step per action and column, as the analyzer's panel allows
+  - no step on a column that `drop_column` removes
+  - outlier steps only on columns where detection applies in the input
+  - `fill_constant` needs a value, and options with no effect are rejected
+
+  Type-dependent rules are checked when their step runs:
+  - `fill_mean`/`fill_median` need numbers
+  - `lowercase` needs a categorical column
+  - `cap_iqr` needs at least 4 finite values
+  - `fill_constant` values are converted to the column's type
+
+  Steps that would leave no rows or no columns are rejected.
+- **Log:** one entry per step, with every field present and `null` where it doesn't apply. `values_nulled` counts cells that became null, such as a failed type conversion.
+- **Writer:**
+  - **Output name:** `<stem>_cleaned.<ext>` next to the input, and the next free `_N` if that name is taken.
+  - **No overwrites:** the file is opened with exclusive create (`"xb"`), so even racing calls can't overwrite each other.
+  - **No partial files:** a failed write deletes what it created.
+  - **CSV:** UTF-8, no index column, `\n` line endings.
+  - **XLSX:** timezone-aware datetimes become naive UTC.
+  - **Inline output** is capped at 1 MB of encoded text.
+
+At 500,000 rows × 10 columns, `clean_dataset` takes about 7 s (`profile_dataset` alone: about 3 s).
+
 ## MCP surface
 
 | Kind | Name | Purpose |
 |---|---|---|
 | Tool | `profile_dataset` | Full report, including recommendations and score |
 | Tool | `detect_outliers` / `find_duplicates` / `analyze_correlations` | One section each, plus `dataset` basics. Smaller results for narrow questions |
+| Tool | `clean_dataset` | Cleaning steps → new file or inline content, log, quality before/after |
 | Resource | `dataquality://schema/report` | JSON Schema of the full report (`application/schema+json`) |
 | Resource | `dataquality://docs/quality-score` | How the score, grade and outlier methods work (`text/markdown`) |
 | Prompt | `review_data_quality(file_path)` | Guides an agent through a full review and an ordered cleaning plan |
 
-The resources are **stateless**: there's no "last report" cache. Server-side state would leak one caller's data to another once several HTTP clients connect (Milestone 4). All tools are annotated read-only and closed-world.
+The resources are **stateless**: there's no "last report" cache. Server-side state would leak one caller's data to another once several HTTP clients connect (Milestone 4). The profiling tools are annotated read-only and closed-world. `clean_dataset` is annotated not read-only, but also not destructive (it never overwrites) and not idempotent (each call writes a new file).
 
 ## Compatibility
 

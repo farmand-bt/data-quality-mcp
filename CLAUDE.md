@@ -29,7 +29,7 @@ Data Quality MCP Server: an MCP server that exposes deterministic dataset profil
 
 ### Behavior
 - No LLM calls anywhere. The server is deterministic tooling.
-- Cleaning (Milestone 3+) is non-destructive: never mutate the input in place, and log every transformation (what was done, which column, how many rows were affected).
+- Cleaning is non-destructive: never mutate the input in place, **never overwrite an existing file (the input included), and never leave a partial output file behind**, and log every transformation (what was done, which column, how many rows were affected).
 
 ### Tool docstrings
 - `MCPServer` builds the schema and description an agent sees from type hints and docstrings (per-argument descriptions via `Annotated[T, Field(description=...)]`). The output schema comes from the return type, i.e. the TypedDicts in `profiler_core/schema.py`, and results are validated against it. Write them for a language model reader: when to use the tool, what each argument means, what comes back, and what the common errors are.
