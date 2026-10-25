@@ -145,3 +145,56 @@ class CorrelationResult(TypedDict):
 
     dataset: DatasetSummary
     correlations: CorrelationInfo
+
+
+# --- Result of the cleaning tool (inputs are in cleaner_core/schema.py) ---
+
+OutputFormat = Literal["csv", "xlsx"]
+
+
+class CleaningLogEntry(TypedDict):
+    """One applied step. Fields that don't apply to its action are None."""
+
+    action: str
+    column: str | None  # None for dataset-level steps (remove_duplicates)
+    strategy: str
+    rows_before: int
+    rows_after: int
+    rows_removed: int
+    values_nulled: int | None  # non-null cells in `column` that became null
+    original_dtype: str | None  # raw pandas dtypes (fix_type only)
+    new_dtype: str | None
+    missing_before: int | None  # handle_missing only
+    missing_after: int | None
+    outliers_treated: int | None  # handle_outliers only
+
+
+class CleaningOutput(TypedDict):
+    """Where the cleaned data went: a new file, or inline content."""
+
+    path: str | None  # the new file, for file input; None for inline input
+    content: str | None  # cleaned data for inline input (CSV text / XLSX base64)
+    format: OutputFormat
+    rows: int
+    columns: int
+
+
+class QualitySnapshot(TypedDict):
+    """Headline quality figures of a dataset, as profile_dataset reports them."""
+
+    rows: int
+    columns: int
+    missing_cells: int
+    exact_duplicates: int
+    quality_score: int
+    quality_grade: QualityGrade
+
+
+class CleaningResult(TypedDict):
+    """Outcome of clean_dataset: output, before/after quality and the log."""
+
+    dataset: DatasetSummary  # the input
+    output: CleaningOutput
+    before: QualitySnapshot
+    after: QualitySnapshot  # profiled from the written output, loaded back
+    log: list[CleaningLogEntry]  # in execution order

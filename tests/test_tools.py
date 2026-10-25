@@ -8,6 +8,7 @@ import pytest
 from mcp import Client, StdioServerParameters
 
 from data_quality_mcp.profiler_core.schema import (
+    CleaningResult,
     CorrelationResult,
     DatasetReport,
     DuplicateResult,
@@ -35,18 +36,62 @@ async def client():
 # --- tools ---
 
 
-async def test_all_tools_listed_read_only_with_schemas(client):
+async def test_all_tools_listed_with_schemas(client):
     tools = {tool.name: tool for tool in (await client.list_tools()).tools}
-    assert set(tools) == set(TOOL_RESULTS)
+    assert set(tools) == set(TOOL_RESULTS) | {"clean_dataset"}
 
     for name, result_type in TOOL_RESULTS.items():
         tool = tools[name]
         assert tool.annotations.read_only_hint is True, name
         assert tool.annotations.open_world_hint is False, name
         assert "absolute" in tool.description.lower(), name
-        assert tool.input_schema["required"] == ["file_path"], name
+        assert "inline_content" in tool.description, name
+        assert set(tool.input_schema["properties"]) == {
+            "file_path",
+            "inline_content",
+            "filename_hint",
+        }, name
+        assert not tool.input_schema.get("required"), name  # one of two is needed
         properties = set(tool.output_schema["properties"])
         assert properties == set(result_type.__annotations__), name
+
+
+async def test_clean_dataset_schema_and_annotations(client):
+    tool = {t.name: t for t in (await client.list_tools()).tools}["clean_dataset"]
+    assert tool.annotations.read_only_hint is False
+    assert tool.annotations.destructive_hint is False  # never overwrites a file
+    assert tool.annotations.idempotent_hint is False  # each call writes a new file
+    assert tool.input_schema["required"] == ["steps"]
+    steps = tool.input_schema["properties"]["steps"]
+    assert (steps["minItems"], steps["maxItems"]) == (1, 50)
+    assert steps["items"]["discriminator"]["propertyName"] == "action"
+    assert set(steps["items"]["discriminator"]["mapping"]) == {
+        "handle_missing",
+        "remove_duplicates",
+        "fix_type",
+        "handle_outliers",
+    }
+    properties = set(tool.output_schema["properties"])
+    assert properties == set(CleaningResult.__annotations__)
+    for name in (
+        "HandleMissingStep",
+        "RemoveDuplicatesStep",
+        "FixTypeStep",
+        "HandleOutliersStep",
+    ):
+        assert tool.input_schema["$defs"][name]["additionalProperties"] is False
+
+
+async def test_clean_dataset_schema_rejects_unknown_keys(client, messy_copy: Path):
+    result = await client.call_tool(
+        "clean_dataset",
+        {
+            "steps": [{"action": "remove_duplicates", "column": "id"}],
+            "file_path": str(messy_copy),
+        },
+    )
+    assert result.is_error is True
+    assert [p.name for p in messy_copy.parent.iterdir()] == ["messy_sample.csv"]
 
 
 async def test_profile_dataset_returns_structured_report(client, messy_path: Path):
@@ -117,6 +162,101 @@ async def test_domain_errors_reach_the_agent(
     assert expected in result.content[0].text
 
 
+@pytest.mark.parametrize("tool", sorted(TOOL_RESULTS))
+async def test_inline_csv_gives_the_same_result_as_the_file(
+    client, messy_path: Path, tool: str
+):
+    by_path = await client.call_tool(tool, {"file_path": str(messy_path)})
+    inline = await client.call_tool(
+        tool,
+        {
+            "inline_content": messy_path.read_text(encoding="utf-8"),
+            "filename_hint": "messy_sample.csv",
+        },
+    )
+    assert inline.is_error is False
+    a, b = by_path.structured_content, inline.structured_content
+    assert b["dataset"]["source"] == "inline_content"
+    for result in (a, b):
+        result.pop("generated_at", None)
+        result["dataset"].pop("source")
+    assert a == b
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        ({}, "neither"),
+        ({"file_path": "x.csv", "inline_content": "a\n1\n"}, "both"),
+        ({"inline_content": "a\n1\n"}, "filename_hint"),
+    ],
+)
+async def test_input_errors_reach_the_agent(client, args: dict, expected: str):
+    result = await client.call_tool("profile_dataset", args)
+    assert result.is_error is True
+    assert expected in result.content[0].text
+
+
+# --- cleaning ---
+
+
+async def test_clean_dataset_writes_a_new_file(client, messy_copy: Path, spec_plan):
+    original = messy_copy.read_bytes()
+    result = await client.call_tool(
+        "clean_dataset", {"steps": spec_plan, "file_path": str(messy_copy)}
+    )
+
+    assert result.is_error is False
+    content = result.structured_content
+    output = Path(content["output"]["path"])
+    assert output == messy_copy.with_name("messy_sample_cleaned.csv")
+    assert output.is_file()
+    assert messy_copy.read_bytes() == original  # the input is untouched
+    scores = (content["before"]["quality_score"], content["after"]["quality_score"])
+    assert scores == (77, 86)
+    assert content["log"][-1]["action"] == "remove_duplicates"
+
+    profiled = await client.call_tool("profile_dataset", {"file_path": str(output)})
+    assert profiled.structured_content["dataset"]["quality_score"] == 86
+
+
+async def test_clean_dataset_inline_returns_the_data(client):
+    result = await client.call_tool(
+        "clean_dataset",
+        {
+            "steps": [{"action": "remove_duplicates"}],
+            "inline_content": "a,b\n1,x\n1,x\n2,y\n",
+            "filename_hint": "t.csv",
+        },
+    )
+    output = result.structured_content["output"]
+    assert output["path"] is None
+    assert output["content"] == "a,b\n1,x\n2,y\n"
+    assert (output["format"], output["rows"]) == ("csv", 2)
+
+
+async def test_clean_dataset_errors_reach_the_agent(client, messy_copy: Path):
+    step = {"action": "fix_type", "column": "nope", "target_type": "numeric"}
+    result = await client.call_tool(
+        "clean_dataset", {"steps": [step], "file_path": str(messy_copy)}
+    )
+    assert result.is_error is True
+    assert "Column 'nope' doesn't exist" in result.content[0].text
+    assert [p.name for p in messy_copy.parent.iterdir()] == ["messy_sample.csv"]
+
+
+async def test_clean_dataset_schema_rejects_json_null_keep(client, messy_copy: Path):
+    result = await client.call_tool(
+        "clean_dataset",
+        {
+            "steps": [{"action": "remove_duplicates", "keep": None}],
+            "file_path": str(messy_copy),
+        },
+    )
+    assert result.is_error is True  # "none" is a string, not JSON null
+    assert [p.name for p in messy_copy.parent.iterdir()] == ["messy_sample.csv"]
+
+
 # --- resources ---
 
 
@@ -157,6 +297,7 @@ async def test_review_prompt(client):
     assert result.messages[0].role == "user"
     assert "C:\\data\\sales.csv" in text
     assert "profile_dataset" in text
+    assert "clean_dataset" in text
 
 
 # --- transport ---

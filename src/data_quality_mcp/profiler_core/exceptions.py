@@ -32,3 +32,11 @@ class TooManyRowsError(DataQualityError):
 
 class DataParseError(DataQualityError):
     """The input could not be parsed into a table, or the table is empty."""
+
+
+class OutputExistsError(DataQualityError):
+    """The requested output file already exists (cleaning never overwrites)."""
+
+
+class OutputWriteError(DataQualityError):
+    """The cleaned output could not be written (no partial file is left)."""
