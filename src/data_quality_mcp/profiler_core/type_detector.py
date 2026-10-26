@@ -18,15 +18,26 @@ _BOOL_VALUES = {"true", "false", "yes", "no", "y", "n"}
 
 
 def parse_datetimes(series: pd.Series) -> pd.Series:
-    """Parse values as datetimes (NaT where unparseable), tolerating mixed formats."""
+    """Parse values as datetimes (NaT where unparseable), tolerating mixed formats.
+
+    Timestamps with different UTC offsets (e.g. "...Z" and "...+02:00") can't
+    share one timezone-aware dtype: pandas 3 raises, and pandas 2 returns an
+    object column. They are parsed to UTC then. This only feeds type detection
+    and stats, so naive values among them being read as UTC doesn't change the
+    data.
+    """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        try:
-            # format="mixed" parses each value individually, so a column mixing
-            # ISO dates, MM/DD/YYYY and "15-Jan-2020" still parses.
-            return pd.to_datetime(series, format="mixed", errors="coerce")
-        except (TypeError, ValueError):
-            return pd.to_datetime(series, errors="coerce")
+        # format="mixed" parses each value individually, so a column mixing
+        # ISO dates, MM/DD/YYYY and "15-Jan-2020" still parses.
+        for options in ({"format": "mixed"}, {}, {"format": "mixed", "utc": True}):
+            try:
+                parsed = pd.to_datetime(series, errors="coerce", **options)
+            except (TypeError, ValueError):
+                continue
+            if pd.api.types.is_datetime64_any_dtype(parsed.dtype):
+                return parsed
+    return pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
 
 
 def has_inconsistent_casing(series: pd.Series) -> bool:

@@ -335,6 +335,36 @@ class TestAnalyzerParityPipeline:
         assert 1000 not in out["x"].values
 
 
+# --- timestamps with mixed UTC offsets ---
+
+
+def test_to_datetime_with_mixed_offsets_converts_to_utc():
+    # Deviation: the analyzer raises "Mixed timezones detected" here
+    values = ["2020-01-01T10:00:00Z", "2020-01-02T10:00:00+02:00", None]
+    df = pd.DataFrame({"t": values})
+    out, _ = fix_types(df, "t", "datetime")
+    assert str(out["t"].dt.tz) == "UTC"
+    assert out["t"].iloc[1] == pd.Timestamp("2020-01-02T08:00:00Z")  # same instant
+    assert out["t"].isna().iloc[2]
+
+
+def test_to_datetime_mixing_naive_and_offset_values_is_rejected():
+    df = pd.DataFrame({"t": ["2020-01-01T10:00:00Z", "2020-01-02 10:00"]})
+    with pytest.raises(InvalidInputError, match="with and without a timezone"):
+        fix_types(df, "t", "datetime")
+
+
+def test_clean_dataset_converts_mixed_offsets(tmp_path: Path):
+    path = tmp_path / "t.csv"
+    path.write_text(
+        "t,x\n2020-01-01T10:00:00Z,1\n2020-01-02T10:00:00+02:00,2\n", encoding="utf-8"
+    )
+    steps = [{"action": "fix_type", "column": "t", "target_type": "datetime"}]
+    result = run_cleaning(steps, file_path=str(path))
+    written = Path(result["output"]["path"]).read_text(encoding="utf-8")
+    assert "2020-01-02 08:00:00+00:00" in written
+
+
 # --- bug fixes (ported back to the analyzer after M3) ---
 
 

@@ -107,6 +107,25 @@ def test_datetime_stats(messy_df: pd.DataFrame):
     assert stats["unparseable_count"] == 0
 
 
+MIXED_OFFSETS = [
+    "2020-01-01T10:00:00Z",
+    "2020-01-02T10:00:00+02:00",
+    "2020-01-03T09:00:00+01:00",
+    "2020-01-04T10:00:00Z",
+]
+
+
+def test_timestamps_with_mixed_offsets_are_profiled():
+    # pandas raises "Mixed timezones detected" for these; profiling used to crash
+    df = pd.DataFrame({"when": MIXED_OFFSETS, "x": [1, 2, 3, 4]})
+    report = generate_report(df, "t.csv", "file_path")
+    column = report["columns"]["when"]
+    assert (column["inferred_type"], column["type_mismatch"]) == ("datetime", True)
+    assert column["stats"]["min_date"].startswith("2020-01-01T10:00:00")
+    assert column["stats"]["unparseable_count"] == 0
+    json.dumps(report, allow_nan=False)
+
+
 def test_categorical_stats(messy_df: pd.DataFrame):
     stats = compute_column_stats(messy_df["neighborhood"], "categorical")
     assert stats["unique_count"] == 4
