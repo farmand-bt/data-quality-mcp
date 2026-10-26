@@ -126,6 +126,28 @@ def test_timestamps_with_mixed_offsets_are_profiled():
     json.dumps(report, allow_nan=False)
 
 
+def test_mixed_offsets_in_different_formats_all_parse():
+    # Codex pre-PR review: the plain fallback infers one format from the first
+    # value and nulled the others, so UTC parsing has to come first
+    from data_quality_mcp.profiler_core.type_detector import parse_datetimes
+
+    values = [
+        "2020-01-01T10:00:00Z",
+        "2020-01-02 10:00:00+02:00",
+        "03/01/2020 10:00 +0100",
+    ]
+    assert parse_datetimes(pd.Series(values)).notna().all()
+
+
+def test_naive_and_offset_mix_is_profiled_without_losing_values():
+    values = ["2020-01-01 10:00"] + [f"2020-01-0{d}T10:00:00Z" for d in range(2, 10)]
+    column = generate_report(pd.DataFrame({"t": values}), "t.csv", "file_path")[
+        "columns"
+    ]["t"]
+    assert column["inferred_type"] == "datetime"
+    assert column["stats"]["unparseable_count"] == 0
+
+
 def test_categorical_stats(messy_df: pd.DataFrame):
     stats = compute_column_stats(messy_df["neighborhood"], "categorical")
     assert stats["unique_count"] == 4

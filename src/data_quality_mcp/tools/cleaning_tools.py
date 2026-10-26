@@ -50,7 +50,9 @@ def clean_dataset(
       datetime, categorical, string, boolean (true/yes/y/1 and false/no/n/0),
       or lowercase (normalizes category labels such as Male/MALE/male).
       Values that can't be converted become null; the log counts them in
-      values_nulled.
+      values_nulled. datetime: timestamps with different UTC offsets are
+      converted to UTC; a column mixing timestamps with and without an
+      offset is rejected (make them consistent first).
     - handle_outliers {column, strategy, method?}: strategy is remove,
       cap_iqr (clips to the IQR fences) or replace_nan. method "iqr"
       (default) or "zscore" chooses the rows for remove/replace_nan. The rows

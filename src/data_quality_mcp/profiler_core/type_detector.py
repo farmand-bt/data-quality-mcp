@@ -30,7 +30,9 @@ def parse_datetimes(series: pd.Series) -> pd.Series:
         warnings.simplefilter("ignore")
         # format="mixed" parses each value individually, so a column mixing
         # ISO dates, MM/DD/YYYY and "15-Jan-2020" still parses.
-        for options in ({"format": "mixed"}, {}, {"format": "mixed", "utc": True}):
+        # UTC comes before the plain fallback, which infers one format from the
+        # first value and would silently null differently formatted ones
+        for options in ({"format": "mixed"}, {"format": "mixed", "utc": True}, {}):
             try:
                 parsed = pd.to_datetime(series, errors="coerce", **options)
             except (TypeError, ValueError):

@@ -337,6 +337,8 @@ class TestAnalyzerParityPipeline:
 
 # --- timestamps with mixed UTC offsets ---
 
+TWO_OFFSETS = ["2020-01-01T10:00:00Z", "2020-01-02T10:00:00+02:00"]
+
 
 def test_to_datetime_with_mixed_offsets_converts_to_utc():
     # Deviation: the analyzer raises "Mixed timezones detected" here
@@ -348,10 +350,46 @@ def test_to_datetime_with_mixed_offsets_converts_to_utc():
     assert out["t"].isna().iloc[2]
 
 
-def test_to_datetime_mixing_naive_and_offset_values_is_rejected():
-    df = pd.DataFrame({"t": ["2020-01-01T10:00:00Z", "2020-01-02 10:00"]})
+@pytest.mark.parametrize(
+    "other",
+    [
+        "2020-01-02 10:00",  # naive timestamp
+        "15-Jan-2020",  # naive date whose "-2020" looks like an offset
+        "01-15-2020",
+    ],
+)
+def test_to_datetime_mixing_naive_and_offset_values_is_rejected(other):
+    df = pd.DataFrame({"t": [*TWO_OFFSETS, other]})
     with pytest.raises(InvalidInputError, match="with and without a timezone"):
         fix_types(df, "t", "datetime")
+
+
+@pytest.mark.parametrize(
+    "other",
+    [
+        "2020-01-03 10:00:00+02",  # hours-only offset
+        "2020-01-03 10:00 UTC",
+        "2020-01-03T10:00:00z",  # lowercase z
+        "2020-01-03 10:00 -0500",
+    ],
+)
+def test_to_datetime_recognises_offset_forms(other):
+    df = pd.DataFrame({"t": [*TWO_OFFSETS, other]})
+    out, _ = fix_types(df, "t", "datetime")
+    assert str(out["t"].dt.tz) == "UTC"
+    assert out["t"].notna().all()
+
+
+def test_to_datetime_with_mixed_offsets_nulls_junk_values():
+    # A value that isn't a timestamp has no timezone to compare, so it
+    # doesn't block the conversion: it becomes null, as for any conversion
+    values = ["2020-01-01T10:00:00Z", "2020-01-02T10:00:00+02:00", "unknown", "TBD"]
+    out, log = run_steps(
+        pd.DataFrame({"t": values}),
+        [{"action": "fix_type", "column": "t", "target_type": "datetime"}],
+    )
+    assert out["t"].isna().tolist() == [False, False, True, True]
+    assert log[0]["values_nulled"] == 2
 
 
 def test_clean_dataset_converts_mixed_offsets(tmp_path: Path):
