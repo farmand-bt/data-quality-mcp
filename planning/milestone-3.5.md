@@ -213,13 +213,21 @@ New settings in `config.py`, each passed to the core as a keyword parameter:
     - Cramér's V tables are counted with numpy instead of `pd.crosstab`
   - **Wide file**, 50,000 × 100 with random gaps in 20 columns: 21.5 s against 19.0 s on `main`, and **no association listed**. Of the 21.5 s, 15 s is type detection trying to parse 15 free-text columns as dates, which was the same before this milestone (a candidate for later).
   - `clean_dataset` at 500,000 × 10 takes 8.4 s, including two full reports.
+- **Pre-PR review fixes:**
+  - **Codex:** a large integer sentinel (9999999999999999) crashed counting, because float conversion changed the key. Fixed.
+  - **Standard reviewer:**
+    - A constant float column (0.1 everywhere) looked as if it varied because of its mean's rounding error, and produced a false association. Constancy is now decided from the raw values.
+    - D1 is vectorised across all targets with matrix products. 200,000 × 50 with gaps in every column takes 0.5 s, down from 20.6 s.
+    - Sentinel values print exactly in recommendations, so they can be copied into `values`.
+    - The docstring is corrected: all-9s codes are listed in any column.
+    - A tool-level XLSX text-date test was added.
 - **Task 0 finding:** in lax mode, Pydantic turned `values: [true]` into `1.0` and `"5"` into `5.0` before the core could reject them. `tools/inputs.py` therefore validates `HandleOutliersStep` in strict mode, which still accepts JSON integers (`5000` → `5000.0`). The core rejects bools and non-finite values too, for direct callers.
 - **Small differences from the spec's wording:**
   - The report builders take `input_format` (".csv" or ".xlsx"). Without it, as for a direct call with a DataFrame, the M1 rule applies, so ISO text stays a mismatch.
   - A single-column dataset has no other column to tell rows apart, so rows sharing a value are exact duplicate rows. The repeat test then never fires, and only the all-9s test can list a value. This follows from D2's definition, and a test documents it.
   - The correlations section's Cramér's V keeps SciPy's default Yates correction on 2 × 2 tables (analyzer parity). D1's bias-corrected V uses none, as specified.
   - Recommendations read the new fields with `.get`, so a report built without them (as in the recommendation tests) still works.
-- **Tests:** 527 pass on Python 3.12 / pandas 3 and on Python 3.10 / pandas 2, with 98% coverage.
+- **Tests:** 531 pass on Python 3.12 / pandas 3 and on Python 3.10 / pandas 2, with 98% coverage.
 - **Version:** 0.4.0.
 - **Port-back list (task 13),** for a separate analyzer PR after this merges:
   - D1, as a relabelling with `"unknown"`

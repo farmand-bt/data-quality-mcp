@@ -74,33 +74,28 @@ def corrected_cramers_v(chi2: float, n: int, shape: tuple[int, int]) -> float:
     return float(np.sqrt(phi2 / denominator)) if denominator > 0 else 0.0
 
 
-def _numeric_tests(
-    indicator: np.ndarray,
+def _point_biserial(
+    indicators: np.ndarray,
     centred: np.ndarray,
     usable: np.ndarray,
-    names: list[str],
+    varies: np.ndarray,
     min_rows: int,
-) -> list[tuple[str, str, float, float]]:
-    """Point-biserial r of one 0/1 missing indicator against every numeric
-    column at once, each over the rows where that column has a finite number.
-    `centred` is the numeric matrix minus each column's mean over its usable
-    rows, with 0 where unusable."""
-    if not names:
-        return []
-    n = usable.sum(axis=0).astype(float)
-    k_missing = (usable * indicator[:, None]).sum(axis=0)
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Point-biserial r of every missing indicator (n x t) against every
+    numeric column (n x k) at once, each pair over the rows where the column
+    has a finite number. `centred` is the numeric matrix minus each column's
+    mean over its usable rows, with 0 where unusable; `varies` marks columns
+    that aren't constant. Returns r, p and which pairs qualify, all k x t."""
+    n = usable.sum(axis=0).astype(float)[:, None]
+    k_missing = usable.T.astype(float) @ indicators
     k_present = n - k_missing
-    sxx = (centred**2).sum(axis=0)
-    sxy = (centred * indicator[:, None]).sum(axis=0)  # sum of centred x is 0
+    sxx = (centred**2).sum(axis=0)[:, None]
+    sxy = centred.T @ indicators  # the centred column sums to 0 on its rows
     with np.errstate(divide="ignore", invalid="ignore"):
-        syy = k_missing * k_present / n
-        r = sxy / np.sqrt(sxx * syy)
-    eligible = (k_missing >= min_rows) & (k_present >= min_rows) & (sxx > 0)
-    p = _pearson_p(np.where(eligible, r, 0.0), n)
-    return [
-        (names[j], "point_biserial", float(r[j]), float(p[j]))
-        for j in np.flatnonzero(eligible)
-    ]
+        r = sxy / np.sqrt(sxx * (k_missing * k_present / n))
+    eligible = (k_missing >= min_rows) & (k_present >= min_rows) & varies[:, None]
+    r = np.where(eligible, r, 0.0)
+    return r, _pearson_p(r, np.broadcast_to(n, r.shape)), eligible
 
 
 def _categorical_test(
@@ -177,6 +172,11 @@ def missing_associations(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)  # all-NaN columns
         centred = np.where(usable, matrix - np.nanmean(matrix, axis=0), 0.0)
+        # Constant from the raw values: a float mean's rounding error would make
+        # a column of 0.1s look as if it varied
+        varies = np.nanmax(matrix, axis=0, initial=-np.inf) > np.nanmin(
+            matrix, axis=0, initial=np.inf
+        )
     categorical_names = [
         c
         for c in df.columns
@@ -187,30 +187,30 @@ def missing_associations(
     n_rows = len(df)
     counts = indicators.sum(axis=0)
     both_classes = (counts >= min_rows) & (n_rows - counts >= min_rows)
+    r_numeric, p_numeric, numeric_ok = _point_biserial(
+        indicators, centred, usable, varies, min_rows
+    )
+    with np.errstate(divide="ignore", invalid="ignore"):
+        phi = np.atleast_2d(np.corrcoef(indicators, rowvar=False))
+    p_phi = _pearson_p(np.nan_to_num(phi), np.full(phi.shape, float(n_rows)))
 
     for i, target in enumerate(targets):
-        y = indicators[:, i]
-        keep = [j for j, name in enumerate(numeric_names) if name != target]
-        tests = _numeric_tests(
-            y,
-            centred[:, keep],
-            usable[:, keep],
-            [numeric_names[j] for j in keep],
-            min_rows,
-        )
+        tests = [
+            (name, "point_biserial", float(r_numeric[j, i]), float(p_numeric[j, i]))
+            for j, name in enumerate(numeric_names)
+            if name != target and numeric_ok[j, i]
+        ]
         for name in categorical_names:
             if name == target:
                 continue
             outcome = _categorical_test(missing[target], df[name], min_rows)
             if outcome is not None:
                 tests.append((name, "cramers_v", *outcome))
-        others = [j for j in range(len(targets)) if j != i and both_classes[j]]
-        if both_classes[i] and others:
-            phi = np.array([np.corrcoef(y, indicators[:, j])[0, 1] for j in others])
-            p = _pearson_p(phi, np.full(len(others), float(n_rows)))
+        if both_classes[i]:
             tests.extend(
-                (targets[j], "missing_together", float(v), float(q))
-                for j, v, q in zip(others, phi, p, strict=True)
+                (targets[j], "missing_together", float(phi[i, j]), float(p_phi[i, j]))
+                for j in range(len(targets))
+                if j != i and both_classes[j]
             )
         if not tests:
             continue

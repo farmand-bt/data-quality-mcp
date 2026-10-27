@@ -107,7 +107,7 @@ Each one reports evidence, not a verdict, and was checked against the problems `
   - **Limits:** it can't show that gaps are random (MCAR) or depend on the missing values themselves (MNAR), so no label is given. `null` means not tested, and `[]` means nothing found.
 - **Possible placeholder codes** (`possible_sentinels` in `OutlierInfo`, `profiler_core/outliers.py`):
   - **The rule:** an IQR outlier that repeats on 2+ rows once exact duplicate rows are removed, in a column whose unique ratio is ≥ 0.5; or an integer of three or more 9s.
-  - **Limits:** a legitimate repeated extreme or a real 999 is listed too. A code inside the normal range, or in a column with few distinct values, is missed.
+  - **Limits:** a legitimate repeated extreme or a real 999 is listed too. A code inside the normal range is missed, as is a repeated code in a column with few distinct values unless it is all 9s.
   - **Cleaning:** happens only through `method: "sentinel"` with the codes the caller confirmed.
 - **Repeated IDs** (`key_columns` in `DuplicateInfo`, `profiler_core/duplicates.py`):
   - **What counts as a key:** a column named `id`/`key`/`uuid`/`guid`, or ending in one after `_`, `-`, a space or a camelCase boundary. Its values must also be ≥ 95% distinct once exact duplicates are removed, which keeps foreign keys out.

@@ -168,6 +168,16 @@ def test_bonferroni_divides_by_the_pairs_actually_tested():
     assert listed not in _associations(df, max_p=p * 1.5)["target"]
 
 
+def test_a_constant_float_column_is_not_a_comparison():
+    # Standard pre-PR review: 0.1's float mean has a rounding error, so the
+    # column looked as if it varied and gave r = 0.707 with p ~ 0
+    df = pd.DataFrame({"c": [0.1] * 300, "t": [1.0] * 300})
+    df.loc[:99, "t"] = np.nan
+    assert _associations(df)["t"] is None  # its only comparison was skipped
+    df["x"] = np.random.default_rng(0).normal(size=300)
+    assert _associations(df)["t"] == []
+
+
 def test_corrected_cramers_v_is_zero_without_association():
     assert corrected_cramers_v(0.0, 100, (2, 5)) == 0.0
     assert corrected_cramers_v(100.0, 100, (2, 2)) == pytest.approx(1.0, abs=0.02)

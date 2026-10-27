@@ -4,6 +4,7 @@ import json
 import sys
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from mcp import Client, StdioServerParameters
 
@@ -147,6 +148,18 @@ async def test_iso_dates_in_a_csv_file_or_inline_are_typed(client, tmp_path, nam
     ):
         report = (await client.call_tool("profile_dataset", args)).structured_content
         assert report["columns"]["when"]["type_mismatch"] is False, args
+
+
+async def test_iso_text_dates_in_an_xlsx_stay_a_mismatch(client, tmp_path):
+    # XLSX has a date type, so ISO text there is still a mismatch (D4)
+    path = tmp_path / "dates.xlsx"
+    pd.DataFrame({"when": ["2020-01-01", "2020-02-03", "2020-03-04"]}).to_excel(
+        path, index=False
+    )
+    report = (
+        await client.call_tool("profile_dataset", {"file_path": str(path)})
+    ).structured_content
+    assert report["columns"]["when"]["type_mismatch"] is True
 
 
 async def test_clean_dataset_schema_rejects_unknown_keys(client, messy_copy: Path):

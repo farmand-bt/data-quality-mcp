@@ -148,8 +148,9 @@ def detect_outliers(
     column with many distinct values, or a number made of three or more 9s
     (999, 9999, ...). These are suspects to confirm with the user, not
     findings: a real repeated extreme (two genuine sales at 1000 in prices of
-    1-100) or a real 999 is listed too, and a code inside the normal range,
-    or one in a column with few distinct values, is missed. [] means none;
+    1-100) or a real 999 is listed too, and a code inside the normal range
+    is missed, as is a repeated code in a column with few distinct values
+    unless it is all 9s. [] means none;
     at most 10 are listed. Confirmed codes can be set to missing with
     clean_dataset (handle_outliers, method "sentinel", values [...]).
 

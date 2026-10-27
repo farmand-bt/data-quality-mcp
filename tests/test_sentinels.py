@@ -111,3 +111,12 @@ def test_sorted_by_count_then_value_and_capped():
     assert len(result) == 10
     keys = [(-s["count"], s["value"]) for s in result]
     assert keys == sorted(keys)
+
+
+def test_large_integers_keep_their_counts():
+    # Codex pre-PR review: float(9999999999999999) is 1e16, so counting by the
+    # converted value raised KeyError
+    df = pd.DataFrame({"x": list(range(20)) + [9999999999999999]})
+    assert _sentinels(df)["x"] == [{"value": 1e16, "count": 1}]
+    df = pd.DataFrame({"x": list(range(20)) + [10**17, 10**17]})
+    assert _sentinels(df)["x"] == [{"value": 1e17, "count": 2}]

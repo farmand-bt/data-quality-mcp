@@ -190,8 +190,10 @@ def generate_recommendations(
 
 
 def _number(value: float) -> str:
-    """-1000.0 -> "-1000", 2.5 -> "2.5"."""
-    return f"{value:.0f}" if float(value).is_integer() else f"{value:g}"
+    """-1000.0 -> "-1000", 1234567.5 -> "1234567.5": exact, so an agent can
+    copy it into clean_dataset's `values` (matched by float equality)."""
+    value = float(value)
+    return f"{value:.0f}" if value.is_integer() else repr(value)
 
 
 _ASSOCIATION_TEMPLATES = {

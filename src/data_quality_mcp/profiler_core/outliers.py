@@ -55,25 +55,31 @@ def possible_sentinels(
     if outside.empty:
         return []
     kept_finite = finite if kept is None else finite[kept.reindex(finite.index)]
-    candidates: set[float] = set()
+    # Keep the column's own values as keys: a large integer such as
+    # 9999999999999999 changes when converted to float, and the counts are
+    # keyed by the original values
+    candidates = set()
     if len(kept_finite) and (
         kept_finite.nunique() / len(kept_finite) >= min_unique_ratio
     ):
         kept_outside = kept_finite[(kept_finite < fence_lo) | (kept_finite > fence_hi)]
         repeats = kept_outside.value_counts()
-        candidates.update(float(v) for v in repeats[repeats >= 2].index)
-    candidates.update(float(v) for v in outside.unique() if _all_nines(v))
+        candidates.update(repeats[repeats >= 2].index)
+    candidates.update(v for v in outside.unique() if _all_nines(v))
     counts = values.value_counts()
     result: list[SentinelValue] = sorted(
-        ({"value": v, "count": int(counts[v])} for v in candidates),
+        ({"value": float(v), "count": int(counts[v])} for v in candidates),
         key=lambda s: (-s["count"], s["value"]),
     )
     return result if max_sentinels is None else result[:max_sentinels]
 
 
 def _all_nines(value: float) -> bool:
-    """999, 9999, ... (or negative): the most common numeric placeholder."""
-    return float(value).is_integer() and bool(_NINES.fullmatch(str(abs(int(value)))))
+    """999, 9999, ... (or negative): the most common numeric placeholder.
+    `value` is the column's own value, so a large integer keeps its digits."""
+    if not isinstance(value, (int, np.integer)) and not float(value).is_integer():
+        return False
+    return bool(_NINES.fullmatch(str(abs(int(value)))))
 
 
 def detect_column_outliers(
