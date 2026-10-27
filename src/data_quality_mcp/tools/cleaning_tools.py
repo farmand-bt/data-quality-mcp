@@ -40,7 +40,8 @@ def clean_dataset(
 
     Steps (objects with an "action"; at most one step per action and column):
     - handle_missing {column, strategy, value?}: strategy is drop_rows,
-      drop_column, fill_mean, fill_median (numeric columns only), fill_mode,
+      drop_column, fill_mean, fill_median (numeric columns only, computed
+      from finite numbers: inf/-inf are ignored), fill_mode,
       fill_constant (needs "value": a number for numeric columns, true/false
       for boolean ones, a date string for dates), ffill or bfill.
     - remove_duplicates {keep?}: "first" (default) or "last" keeps one copy of
@@ -53,10 +54,16 @@ def clean_dataset(
       values_nulled. datetime: timestamps with different UTC offsets are
       converted to UTC; a column mixing timestamps with and without an
       offset is rejected (make them consistent first).
-    - handle_outliers {column, strategy, method?}: strategy is remove,
-      cap_iqr (clips to the IQR fences) or replace_nan. method "iqr"
+    - handle_outliers {column, strategy, method?, values?}: strategy is
+      remove, cap_iqr (clips to the IQR fences) or replace_nan. method "iqr"
       (default) or "zscore" chooses the rows for remove/replace_nan. The rows
-      are exactly the ones detect_outliers reports for the input. A column
+      are exactly the ones detect_outliers reports for the input. method
+      "sentinel" acts only on the placeholder codes listed in "values"
+      (1 to 10 numbers, e.g. [-1000, 9999999]), each of which must be one of
+      the column's possible_sentinels in the input; use it with replace_nan
+      (usual) or remove, not cap_iqr. Confirm the codes with the user first:
+      possible_sentinels are suspects, and a real extreme value can be among
+      them. "values" is only allowed with method "sentinel". A column
       must already be numeric (or mostly numeric) in the input: if it only
       becomes numeric through fix_type, convert it in this call and treat its
       outliers in a second call on the output.
@@ -78,9 +85,9 @@ def clean_dataset(
     Output: dataset (the input), output (path or content, format, rows,
     columns), before and after (rows, columns, missing_cells,
     exact_duplicates, quality_score, quality_grade; after is measured on the
-    written output, so it matches profile_dataset on that file; CSV stores no
-    types, so converted dates read back as text and still count as a type
-    mismatch), and log (one entry per step in execution order: rows
+    written output, so it matches profile_dataset on that file; dates written
+    to a CSV as ISO text count as typed, so converting them pays off there
+    too), and log (one entry per step in execution order: rows
     before/after/removed, values_nulled, dtypes, missing counts and
     outliers_treated, null where not applicable).
 

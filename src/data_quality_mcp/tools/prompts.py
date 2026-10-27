@@ -28,10 +28,14 @@ def review_data_quality(
    columns are affected, and why it matters for analysis.
 4. Propose an ordered cleaning plan, in this order, skipping steps that don't
    apply: (a) remove exact duplicate rows, (b) fix type mismatches and
-   inconsistent labels, (c) handle missing values, (d) review and treat
-   outliers. For each step, name the columns and a concrete approach.
-5. Point out anything that needs a human decision (for example, whether
-   near-duplicates or outliers are real data or errors).
+   inconsistent labels, (c) handle missing values (if a column's
+   `missing_related_to` lists another column, say that a mean or median
+   fill would bias it), (d) review and treat outliers. For each step, name
+   the columns and a concrete approach.
+5. Point out anything that needs a human decision: whether near-duplicates,
+   outliers or `possible_sentinels` are real data or errors (placeholder
+   codes are only suspects until the user confirms them), and which record
+   is right where a key column has conflicting values.
 
 Do not modify anything yet. If the user agrees to the plan, apply it with
 `clean_dataset`, which writes a new file and never changes the original.
