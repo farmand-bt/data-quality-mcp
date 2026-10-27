@@ -48,6 +48,7 @@ def run_cleaning(
     suffix: str = config.CLEANED_SUFFIX,
     iqr_multiplier: float = config.OUTLIER_IQR_MULTIPLIER,
     zscore_threshold: float = config.OUTLIER_ZSCORE_THRESHOLD,
+    max_sentinels: int = config.MAX_SENTINELS,
 ) -> CleaningResult:
     """Apply `steps` to a dataset and return the output, quality before and
     after, and the log.
@@ -93,7 +94,11 @@ def run_cleaning(
     )
 
     cleaned, log = run_steps(
-        df, steps, iqr_multiplier=iqr_multiplier, zscore_threshold=zscore_threshold
+        df,
+        steps,
+        iqr_multiplier=iqr_multiplier,
+        zscore_threshold=zscore_threshold,
+        max_sentinels=max_sentinels,
     )
     raw = serialize(cleaned, extension)
 
