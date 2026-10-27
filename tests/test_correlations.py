@@ -85,3 +85,49 @@ def test_categorical_column_limit():
 
 def test_cramers_v_degenerate_table_is_zero():
     assert cramers_v(pd.Series(["x"] * 5), pd.Series(["a", "b", "a", "b", "a"])) == 0.0
+
+
+# --- minimum shared rows (planning/milestone-3.5.md, D5) ---
+
+
+def _paired(n_shared: int) -> pd.DataFrame:
+    """x and y both present on n_shared rows (y = 2x), y missing on 5 more."""
+    x = [float(i) for i in range(n_shared + 5)]
+    y = [2.0 * i for i in range(n_shared)] + [None] * 5
+    return pd.DataFrame({"x": x, "y": y})
+
+
+def test_pearson_needs_ten_shared_rows():
+    below = _correlations(_paired(9))
+    assert below["pearson"]["x"]["y"] is None
+    assert below["high_correlation_pairs"] == []
+    at = _correlations(_paired(10))
+    assert at["pearson"]["x"]["y"] == 1.0
+    assert at["high_correlation_pairs"][0]["value"] == 1.0
+
+
+def test_cramers_v_needs_ten_shared_rows():
+    def frame(n_shared: int) -> pd.DataFrame:
+        a = ["x", "y"] * 10
+        b = (["x", "y"] * 10)[:n_shared] + [None] * (20 - n_shared)
+        return pd.DataFrame({"a": a, "b": b})
+
+    below = _correlations(frame(9))
+    assert below["cramers_v"]["a"]["b"] is None
+    assert below["high_correlation_pairs"] == []
+    # Computed from 10 rows on (Yates-corrected on a 2x2 table, as in the analyzer)
+    assert _correlations(frame(10))["cramers_v"]["a"]["b"] > 0.5
+
+
+def test_two_rows_no_longer_give_a_perfect_correlation():
+    # The 4-row inline CSV from M3's manual testing: id and price share 2 rows
+    df = pd.DataFrame(
+        {
+            "id": [1, 2, 2, 3],
+            "name": ["a", "b", "b", "c"],
+            "price": [1.5, None, None, 99],
+        }
+    )
+    result = _correlations(df)
+    assert result["pearson"]["id"]["price"] is None
+    assert result["high_correlation_pairs"] == []

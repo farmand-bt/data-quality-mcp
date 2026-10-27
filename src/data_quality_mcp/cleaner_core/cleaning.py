@@ -48,6 +48,7 @@ def run_cleaning(
     suffix: str = config.CLEANED_SUFFIX,
     iqr_multiplier: float = config.OUTLIER_IQR_MULTIPLIER,
     zscore_threshold: float = config.OUTLIER_ZSCORE_THRESHOLD,
+    max_sentinels: int = config.MAX_SENTINELS,
 ) -> CleaningResult:
     """Apply `steps` to a dataset and return the output, quality before and
     after, and the log.
@@ -88,10 +89,16 @@ def run_cleaning(
     )
     extension = extension or loaded.extension
     df = prepare_frame(loaded.df, loaded.source)
-    before = quality_snapshot(generate_report(df, loaded.name, loaded.source))
+    before = quality_snapshot(
+        generate_report(df, loaded.name, loaded.source, input_format=loaded.extension)
+    )
 
     cleaned, log = run_steps(
-        df, steps, iqr_multiplier=iqr_multiplier, zscore_threshold=zscore_threshold
+        df,
+        steps,
+        iqr_multiplier=iqr_multiplier,
+        zscore_threshold=zscore_threshold,
+        max_sentinels=max_sentinels,
     )
     raw = serialize(cleaned, extension)
 
@@ -107,7 +114,9 @@ def run_cleaning(
             f"The cleaned data would be too large as {extension} ({exc}) Choose a "
             ".csv output_path instead."
         ) from exc
-    after = quality_snapshot(generate_report(reloaded, loaded.name, loaded.source))
+    after = quality_snapshot(
+        generate_report(reloaded, loaded.name, loaded.source, input_format=extension)
+    )
 
     if loaded.source == "file_path":  # written last: only once all else succeeded
         written = write_output(

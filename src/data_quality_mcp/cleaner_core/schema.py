@@ -23,7 +23,7 @@ TargetType = Literal[
     "numeric", "datetime", "categorical", "string", "boolean", "lowercase"
 ]
 OutlierStrategy = Literal["remove", "cap_iqr", "replace_nan"]
-OutlierMethod = Literal["iqr", "zscore"]
+OutlierMethod = Literal["iqr", "zscore", "sentinel"]
 DuplicateKeep = Literal["first", "last", "none"]
 
 
@@ -56,13 +56,16 @@ class FixTypeStep(TypedDict):
 
 class HandleOutliersStep(TypedDict):
     """Treat the outliers of one numeric column. `method` ("iqr", the default,
-    or "zscore") chooses the rows for remove and replace_nan; cap_iqr always
-    clips to the IQR fences."""
+    "zscore" or "sentinel") chooses the rows for remove and replace_nan;
+    cap_iqr always clips to the IQR fences. "sentinel" needs `values`: the
+    placeholder codes the user confirmed, each one of the column's
+    possible_sentinels (not allowed with any other method)."""
 
     action: Literal["handle_outliers"]
     column: str
     strategy: OutlierStrategy
     method: NotRequired[OutlierMethod]
+    values: NotRequired[list[float]]
 
 
 # Discriminated by `action`; tools/ adds Pydantic's discriminator annotation

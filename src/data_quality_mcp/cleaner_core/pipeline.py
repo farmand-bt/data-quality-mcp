@@ -78,6 +78,7 @@ def run_steps(
     *,
     iqr_multiplier: float = config.OUTLIER_IQR_MULTIPLIER,
     zscore_threshold: float = config.OUTLIER_ZSCORE_THRESHOLD,
+    max_sentinels: int = config.MAX_SENTINELS,
 ) -> tuple[pd.DataFrame, list[CleaningLogEntry]]:
     """Validate `steps`, run them in the analyzer's order on a copy of `df`,
     and return the cleaned frame (0-based index) and the log.
@@ -85,7 +86,7 @@ def run_steps(
     `df` must have a 0-based RangeIndex (profiler_core.report.prepare_frame),
     so its labels are the row positions the report shows.
     """
-    outlier_rows = _validate(df, steps, iqr_multiplier, zscore_threshold)
+    outlier_rows = _validate(df, steps, iqr_multiplier, zscore_threshold, max_sentinels)
     out = df.copy()
     log: list[CleaningLogEntry] = []
     for step in sorted(steps, key=step_priority):  # stable: keeps caller order
@@ -119,10 +120,12 @@ def _validate(
     steps: Sequence[CleaningStep],
     iqr_multiplier: float,
     zscore_threshold: float,
+    max_sentinels: int,
 ) -> dict[str, dict[str, list[int]]]:
     """Check the static rules; return the input's outlier rows per column and
     method for every handle_outliers step."""
     seen: set[tuple[str, str]] = set()
+    kept = ~df.duplicated(keep="first")  # as detect_outliers, for sentinels
     dropped = {
         s["column"]
         for s in steps
@@ -167,6 +170,13 @@ def _validate(
                     "cap_iqr always clips to the IQR fences, so method 'zscore' "
                     "has no effect with it. Omit 'method' or use 'iqr'."
                 )
+            if step["strategy"] == "cap_iqr" and method == "sentinel":
+                raise InvalidInputError(
+                    "method 'sentinel' doesn't work with cap_iqr: clipping a "
+                    "placeholder code to a fence would make it look like a real "
+                    "value. Use replace_nan or remove."
+                )
+            _validate_sentinel_values(step, method, max_sentinels)
             # The same gate as profiler_core.outliers.detect_outliers, so a step
             # is accepted exactly where detect_outliers reports a result
             inferred, _ = infer_type(df[column])
@@ -177,6 +187,8 @@ def _validate(
                     iqr_multiplier=iqr_multiplier,
                     zscore_threshold=zscore_threshold,
                     max_indices=len(df),
+                    kept=kept,
+                    max_sentinels=None,  # uncapped, as the outlier rows
                 )
                 if inferred in ("numeric", "mixed")
                 else None
@@ -193,7 +205,66 @@ def _validate(
                 "iqr": info["iqr_indices"],
                 "zscore": info["zscore_indices"],
             }
+            if method == "sentinel":
+                outlier_rows[column]["sentinel"] = _sentinel_rows(
+                    df[column], column, step["values"], info["possible_sentinels"]
+                )
     return outlier_rows
+
+
+def _validate_sentinel_values(
+    step: CleaningStep, method: str, max_sentinels: int
+) -> None:
+    """`values` goes with method "sentinel" only, as 1 to `max_sentinels`
+    finite numbers (planning/milestone-3.5.md, D7)."""
+    if method != "sentinel":
+        if "values" in step:
+            raise InvalidInputError(
+                "'values' only applies to method 'sentinel'. Remove it, or set "
+                "method to 'sentinel'."
+            )
+        return
+    values = step.get("values")
+    if not isinstance(values, list) or not 1 <= len(values) <= max_sentinels:
+        raise InvalidInputError(
+            f"method 'sentinel' needs 'values': 1 to {max_sentinels} placeholder "
+            "codes the user confirmed, taken from the column's possible_sentinels "
+            "(detect_outliers or profile_dataset)."
+        )
+    for value in values:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise InvalidInputError(f"'values' must be finite numbers, got {value!r}.")
+
+
+def _number(value: float) -> str:
+    """9999999.0 -> "9999999", 2.5 -> "2.5" (no exponent notation)."""
+    value = float(value)
+    return f"{value:.0f}" if value.is_integer() else repr(value)
+
+
+def _sentinel_rows(
+    series: pd.Series, column: str, values: list[float], candidates: list[dict]
+) -> list[int]:
+    """Rows holding the confirmed codes. Each must be one of the column's
+    sentinel candidates on the input, the same test the report uses, compared
+    as floats after the same numeric conversion."""
+    allowed = {c["value"] for c in candidates}
+    rejected = [v for v in values if float(v) not in allowed]
+    if rejected:
+        shown = ", ".join(_number(c["value"]) for c in candidates[:10]) or "none"
+        more = f" (first 10 of {len(candidates)})" if len(candidates) > 10 else ""
+        raise InvalidInputError(
+            f"{', '.join(_number(v) for v in rejected)} isn't a possible "
+            f"sentinel in '{column}' in the input, so it can't be cleaned with "
+            f"method 'sentinel'. Candidates{more}: {shown}."
+        )
+    numeric = pd.to_numeric(series, errors="coerce")
+    selected = numeric.isin([float(v) for v in values])
+    return sorted(int(i) for i in numeric.index[selected.to_numpy()])
 
 
 def _validate_keys(step: CleaningStep) -> None:
@@ -298,15 +369,20 @@ def _apply(
 
 def _require_numbers(series: pd.Series, column: str, strategy: str) -> None:
     """The analyzer's UI offers fill_mean/fill_median only for numeric/mixed
-    columns; with no numbers at all its handler crashes on round(nan)."""
+    columns; with no numbers at all its handler crashes on round(nan). The fill
+    uses finite numbers only (M3.5 D6), so at least one is needed."""
     inferred, _ = infer_type(series)
-    if inferred not in ("numeric", "mixed") or not (
-        pd.to_numeric(series, errors="coerce").notna().any()
-    ):
+    numeric = pd.to_numeric(series, errors="coerce")
+    if inferred not in ("numeric", "mixed") or not numeric.notna().any():
         raise InvalidInputError(
             f"{strategy} needs a numeric column with at least one number, and "
             f"'{column}' is {inferred}. Use fill_mode or fill_constant, or list a "
             "fix_type step to numeric before this one."
+        )
+    if not np.isfinite(numeric.to_numpy(dtype=float, na_value=np.nan)).any():
+        raise InvalidInputError(
+            f"{strategy} needs at least one finite number, and '{column}' has only "
+            "inf/-inf or missing values. Use fill_constant, or handle_outliers first."
         )
 
 

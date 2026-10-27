@@ -25,6 +25,7 @@ RecommendationCategory = Literal[
     "missing", "type", "consistency", "duplicate", "outlier", "correlation"
 ]
 CorrelationMethod = Literal["pearson", "cramers_v"]
+MissingAssociationMethod = Literal["point_biserial", "cramers_v", "missing_together"]
 
 
 class DatasetSummary(TypedDict):
@@ -47,6 +48,13 @@ class DatasetInfo(TypedDict):
     quality_grade: QualityGrade
 
 
+class SentinelValue(TypedDict):
+    """An outlier value that may be a placeholder code (e.g. -1000, 9999999)."""
+
+    value: float
+    count: int  # input rows holding the value, duplicates included
+
+
 class OutlierInfo(TypedDict):
     """Outliers in one numeric column, by IQR fences and by classic z-score."""
 
@@ -59,6 +67,16 @@ class OutlierInfo(TypedDict):
     zscore_pct: float
     zscore_indices: list[int]
     indices_truncated: bool
+    # Suspects to confirm, not a verdict; [] = checked, none (also without fences)
+    possible_sentinels: list[SentinelValue]
+
+
+class MissingAssociation(TypedDict):
+    """An observed column whose values go with another column's missingness."""
+
+    column: str
+    method: MissingAssociationMethod
+    value: float  # signed for point_biserial; > 0 for cramers_v, missing_together
 
 
 class ColumnReport(TypedDict):
@@ -69,13 +87,26 @@ class ColumnReport(TypedDict):
     type_mismatch: bool
     missing_count: int
     missing_pct: float
+    # None: not tested (no missing values, past the column cap, or no pair had
+    # enough rows); []: at least one pair tested, none listed
+    missing_related_to: list[MissingAssociation] | None
     stats: dict[str, Any]
     outliers: OutlierInfo | None  # None: not applicable (non-numeric / < 4 values)
     warnings: list[str]
 
 
+class KeyColumnInfo(TypedDict):
+    """An identifier-like column whose values repeat on rows with different data."""
+
+    column: str
+    conflicting_values: int  # key values on more than one non-identical row
+    conflicting_rows: int
+    sample_indices: list[int]
+    indices_truncated: bool
+
+
 class DuplicateInfo(TypedDict):
-    """Exact and near-duplicate rows."""
+    """Exact and near-duplicate rows, and repeated values in key columns."""
 
     exact_count: int
     exact_pct: float
@@ -84,6 +115,7 @@ class DuplicateInfo(TypedDict):
     near_duplicate_pct: float
     near_sample_indices: list[int]
     indices_truncated: bool
+    key_columns: list[KeyColumnInfo]  # [] = no identifier-like column found
 
 
 class HighCorrelationPair(TypedDict):
@@ -99,7 +131,7 @@ class CorrelationInfo(TypedDict):
     """Pearson (numeric) and Cramér's V (categorical) associations."""
 
     pearson: dict[str, dict[str, float | None]]
-    cramers_v: dict[str, dict[str, float]]
+    cramers_v: dict[str, dict[str, float | None]]  # None: too few shared rows
     high_correlation_pairs: list[HighCorrelationPair]
 
 

@@ -9,7 +9,6 @@ reported generically by the SDK.
 from collections.abc import Callable
 from typing import TypeVar
 
-import pandas as pd
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
@@ -45,13 +44,15 @@ def _run(
     file_path: str | None,
     inline_content: str | None,
     filename_hint: str | None,
-    build: Callable[[pd.DataFrame, str, str], T],
+    build: Callable[..., T],
 ) -> T:
     """Load the input and pass it to a core report builder, mapping domain
     errors to ToolError so the agent sees an actionable message."""
     try:
         loaded = load_input(file_path, inline_content, filename_hint)
-        return build(loaded.df, loaded.name, loaded.source)
+        return build(
+            loaded.df, loaded.name, loaded.source, input_format=loaded.extension
+        )
     except DataQualityError as exc:
         raise ToolError(str(exc)) from exc
 
@@ -64,10 +65,11 @@ def profile_dataset(
     """Profile a tabular dataset and return a full, structured data quality report.
 
     Use this tool to assess a CSV or Excel file before analyzing, cleaning, or
-    modeling it. It covers missing values, type mismatches (e.g. numbers stored
-    as text, dates in several formats), per-column statistics, outliers,
-    duplicate rows, correlations, prioritized recommendations, and an overall
-    quality score. It only reads the data. The analysis is deterministic. For a
+    modeling it. It covers missing values and what they go with, type
+    mismatches (e.g. numbers stored as text, dates in several formats),
+    per-column statistics, outliers and possible placeholder codes, duplicate
+    rows and repeated IDs, correlations, prioritized recommendations, and an
+    overall quality score. It only reads the data. The analysis is deterministic. For a
     narrow question, the focused tools (detect_outliers, find_duplicates,
     analyze_correlations) return a smaller result. To fix the issues, use
     clean_dataset.
@@ -84,14 +86,28 @@ def profile_dataset(
       correlation) and a column (null = dataset-level). Start here.
     - columns: one entry per column with pandas_dtype (how it is stored),
       inferred_type (numeric, categorical, datetime, boolean, text or mixed),
-      type_mismatch, missing_count, missing_pct, stats (fields depend on
+      type_mismatch (in a CSV, dates written as ISO 8601 text such as
+      2024-01-31 are not a mismatch: CSV has no date type), missing_count,
+      missing_pct, missing_related_to, stats (fields depend on
       inferred_type; for numeric/mixed columns, non_numeric_examples shows the
       offending values, and count/mean/std/etc. cover finite numbers only:
       +/-inf values are excluded and counted separately in infinite_count, so
       count can be lower than rows - missing_count), outliers (see
       detect_outliers; null when not applicable), and warnings
       (plain-language issues with suggested fixes).
-    - duplicates: see find_duplicates. correlations: see analyze_correlations.
+    - missing_related_to: observed columns whose values go with this
+      column's missing values, strongest first, each {column, method, value}.
+      method is point_biserial (value = correlation with that numeric column;
+      positive means more missing where it is higher), cramers_v (association
+      with that category column, 0 to 1) or missing_together (the two columns
+      go missing in the same rows). Only strong, significant associations are
+      listed. This is evidence, not a verdict: if gaps depend on another
+      column, a mean or median fill biases the column. [] means tested and
+      nothing found, which is consistent with random gaps but doesn't prove
+      them. null means not tested: no missing values, too few missing or
+      present rows, or past the first 50 columns with missing values.
+    - duplicates: see find_duplicates (includes key_columns, repeated IDs).
+      correlations: see analyze_correlations.
     - generated_at: UTC timestamp.
 
     Row indices anywhere in the report are 0-based data-row positions (header
@@ -126,6 +142,18 @@ def detect_outliers(
     values are always flagged by both methods and counted in the column's
     stats.infinite_count (see profile_dataset).
 
+    possible_sentinels lists outlier values that may be placeholder codes
+    rather than measurements, as {value, count} (count = rows holding it):
+    an IQR outlier that repeats on 2+ rows (exact duplicate rows aside) in a
+    column with many distinct values, or a number made of three or more 9s
+    (999, 9999, ...). These are suspects to confirm with the user, not
+    findings: a real repeated extreme (two genuine sales at 1000 in prices of
+    1-100) or a real 999 is listed too, and a code inside the normal range
+    is missed, as is a repeated code in a column with few distinct values
+    unless it is all 9s. [] means none;
+    at most 10 are listed. Confirmed codes can be set to missing with
+    clean_dataset (handle_outliers, method "sentinel", values [...]).
+
     Output: dataset (name, source, rows, columns) and outliers, a mapping from
     every column to its result, or null where detection doesn't apply
     (non-numeric columns, or fewer than 4 finite numbers and no infinite
@@ -144,7 +172,8 @@ def find_duplicates(
     inline_content: InlineContent = None,
     filename_hint: FilenameHint = None,
 ) -> DuplicateResult:
-    """Find exact and near-duplicate rows in a CSV or Excel dataset.
+    """Find exact and near-duplicate rows, and repeated IDs, in a CSV or Excel
+    dataset.
 
     Use this when you only need duplicate analysis; profile_dataset includes the
     same data plus everything else. Read-only and deterministic.
@@ -157,6 +186,14 @@ def find_duplicates(
       identical to another row on every column except exactly one, excluding
       exact duplicates. Often legitimate (e.g. a corrected value), so review
       before removing. Not computed for 1 column or more than 50 columns.
+    - key_columns: identifier-like columns (named id, key, uuid or guid, or
+      ending in one, e.g. customer_id, orderKey, CustomerID) whose values are
+      nearly all distinct once exact duplicate rows are removed (so a foreign
+      key that repeats by design is left out). For each: conflicting_values
+      (IDs found on rows with different data), conflicting_rows and
+      sample_indices. Two records under one ID usually mean one is outdated
+      or corrected: decide which is right before deduplicating. A key column
+      with no conflicts is listed with zeros; [] means no key column found.
     Indices are 0-based data-row positions (CSV line = index + 2), sorted and
     capped at 50; indices_truncated is true when a list was cut.
 
@@ -178,10 +215,12 @@ def analyze_correlations(
 
     Output: dataset (name, source, rows, columns) and correlations:
     - pearson: full matrix over numeric/mixed columns (-1 to 1; null where
-      undefined, e.g. a constant column). At most the first 50 numeric columns.
+      undefined, e.g. a constant column, or where fewer than 10 rows have both
+      values). At most the first 50 numeric columns.
     - cramers_v: association between categorical/boolean columns (0 to 1),
-      upper triangle only. At most the first 15 such columns with no more than
-      50 distinct values each; others are skipped.
+      upper triangle only; null where fewer than 10 rows have both values. At
+      most the first 15 such columns with no more than 50 distinct values
+      each; others are skipped.
     - high_correlation_pairs: pairs with |value| >= 0.9, strongest first, each
       with col_a, col_b, method (pearson or cramers_v) and value.
 

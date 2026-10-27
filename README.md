@@ -4,15 +4,15 @@ An MCP server that exposes the core logic of the Data Quality Analyzer project a
 
 Instead of a person uploading a CSV to a dashboard, an agent calls `profile_dataset` as part of its own workflow and gets back a structured, schema-validated quality report. The server makes **no LLM calls**: it is deterministic tooling, and the reasoning happens in whichever agent calls it.
 
-> **Status:** Milestone 3 of 5. Profiling covers types, statistics, missing values, outliers, duplicates, correlations, prioritized recommendations and a quality score. `clean_dataset` applies cleaning steps and reports what changed. Every tool takes a file path or the data inline. Remote (HTTP) deployment comes in Milestone 4. See [`planning/project-overview.md`](planning/project-overview.md) and the per-milestone specs in [`planning/`](planning/).
+> **Status:** Milestones 1–3.5 of 5. Profiling covers types, statistics, missing values and what they go with, outliers and possible placeholder codes, duplicates and repeated IDs, correlations, prioritized recommendations and a quality score. `clean_dataset` applies cleaning steps and reports what changed. Every tool takes a file path or the data inline. Remote (HTTP) deployment comes in Milestone 4. See [`planning/project-overview.md`](planning/project-overview.md) and the per-milestone specs in [`planning/`](planning/).
 
 ## Tools
 
 | Tool | What it does |
 |---|---|
-| `profile_dataset` | Full report for a `.csv` or `.xlsx` dataset: quality score and grade, recommendations sorted by severity, and per column the inferred type, type mismatches, missing values, stats, outliers and warnings, plus duplicate rows and correlations. |
-| `detect_outliers` | Outliers in every numeric column (IQR primary, z-score secondary), with fences and row indices. |
-| `find_duplicates` | Exact and near-duplicate rows, with row indices. |
+| `profile_dataset` | Full report for a `.csv` or `.xlsx` dataset: quality score and grade, recommendations sorted by severity, and per column the inferred type, type mismatches, missing values (and which other columns they go with), stats, outliers and warnings, plus duplicate rows and correlations. |
+| `detect_outliers` | Outliers in every numeric column (IQR primary, z-score secondary), with fences, row indices and possible placeholder codes (e.g. -1000, 9999999). |
+| `find_duplicates` | Exact and near-duplicate rows, and ID columns whose values appear on rows with different data, with row indices. |
 | `analyze_correlations` | Pearson (numeric) and Cramér's V (categorical) associations, plus highly correlated pairs. |
 | `clean_dataset` | Applies a list of cleaning steps (missing values, duplicates, type fixes, outliers), writes the result to a **new** file or returns it inline, and reports a log plus the quality score before and after. |
 
@@ -47,7 +47,14 @@ Where the result goes depends on the input:
 - **File input:** a new `<name>_cleaned.<ext>` is written next to the original (`_cleaned_2`, … if taken), or to `output_path`.
 - **Inline input:** the cleaned data comes back in the result, up to 1 MB.
 
-The result's `after` figures come from profiling the written output. A CSV stores no types, so dates converted with `fix_type` read back as text; write `.xlsx` to keep them typed.
+The result's `after` figures come from profiling the written output. Dates converted with `fix_type` are written to a CSV as ISO text, which counts as typed, so CSV and `.xlsx` output score the same.
+
+Placeholder codes that `detect_outliers` lists under `possible_sentinels` are only suspects. Once the user confirms them, they can be set to missing without touching genuine extremes:
+
+```json
+{"action": "handle_outliers", "column": "price", "strategy": "replace_nan",
+ "method": "sentinel", "values": [-1000, 9999999]}
+```
 
 **Trust:** the server runs with your permissions, so `file_path` and `output_path` can reach anything you can. That's normal for a local stdio server, but be careful with data from untrusted sources: text in the data could steer an agent. A cleaned file isn't sanitized for spreadsheets either. Cells starting with `=`, `+`, `-` or `@` stay live formulas when the file is opened in Excel.
 

@@ -4,6 +4,7 @@ import json
 import sys
 from pathlib import Path
 
+import pandas as pd
 import pytest
 from mcp import Client, StdioServerParameters
 
@@ -80,6 +81,85 @@ async def test_clean_dataset_schema_and_annotations(client):
         "HandleOutliersStep",
     ):
         assert tool.input_schema["$defs"][name]["additionalProperties"] is False
+    outlier_step = tool.input_schema["$defs"]["HandleOutliersStep"]["properties"]
+    assert outlier_step["method"]["enum"] == ["iqr", "zscore", "sentinel"]
+    assert outlier_step["values"] == {
+        "items": {"type": "number"},
+        "title": "Values",
+        "type": "array",
+    }
+
+
+@pytest.mark.parametrize("values", [[True], ["5000"]])
+async def test_sentinel_values_are_not_coerced(client, messy_copy: Path, values):
+    # Lax validation would turn true into 1.0 and "5000" into 5000.0
+    step = {
+        "action": "handle_outliers",
+        "column": "price",
+        "strategy": "replace_nan",
+        "method": "sentinel",
+        "values": values,
+    }
+    result = await client.call_tool(
+        "clean_dataset", {"steps": [step], "file_path": str(messy_copy)}
+    )
+    assert result.is_error is True
+    assert [p.name for p in messy_copy.parent.iterdir()] == ["messy_sample.csv"]
+
+
+async def test_clean_dataset_sentinel_step(client, messy_copy: Path):
+    step = {
+        "action": "handle_outliers",
+        "column": "price",
+        "strategy": "replace_nan",
+        "method": "sentinel",
+        "values": [-1000, 5000, 9999999],  # JSON integers
+    }
+    result = await client.call_tool(
+        "clean_dataset", {"steps": [step], "file_path": str(messy_copy)}
+    )
+    assert result.is_error is False
+    assert result.structured_content["log"][0]["values_nulled"] == 10
+
+
+async def test_new_report_fields_reach_the_agent(client, messy_path: Path):
+    report = (
+        await client.call_tool("profile_dataset", {"file_path": str(messy_path)})
+    ).structured_content
+    assert report["columns"]["school_rating"]["missing_related_to"][0]["column"] == (
+        "age_years"
+    )
+    assert len(report["columns"]["price"]["outliers"]["possible_sentinels"]) == 3
+    assert report["duplicates"]["key_columns"][0]["sample_indices"] == [13, 65]
+    outliers = (
+        await client.call_tool("detect_outliers", {"file_path": str(messy_path)})
+    ).structured_content
+    assert outliers["outliers"]["price"]["possible_sentinels"][0]["value"] == -1000.0
+
+
+@pytest.mark.parametrize("name", ["dates.CSV", "dates.csv"])
+async def test_iso_dates_in_a_csv_file_or_inline_are_typed(client, tmp_path, name):
+    text = "when,x\n2020-01-01,1\n2020-02-03,2\n2020-03-04,3\n"
+    path = tmp_path / name
+    path.write_text(text, encoding="utf-8")
+    for args in (
+        {"file_path": str(path)},
+        {"inline_content": text, "filename_hint": name},
+    ):
+        report = (await client.call_tool("profile_dataset", args)).structured_content
+        assert report["columns"]["when"]["type_mismatch"] is False, args
+
+
+async def test_iso_text_dates_in_an_xlsx_stay_a_mismatch(client, tmp_path):
+    # XLSX has a date type, so ISO text there is still a mismatch (D4)
+    path = tmp_path / "dates.xlsx"
+    pd.DataFrame({"when": ["2020-01-01", "2020-02-03", "2020-03-04"]}).to_excel(
+        path, index=False
+    )
+    report = (
+        await client.call_tool("profile_dataset", {"file_path": str(path)})
+    ).structured_content
+    assert report["columns"]["when"]["type_mismatch"] is True
 
 
 async def test_clean_dataset_schema_rejects_unknown_keys(client, messy_copy: Path):
@@ -213,11 +293,11 @@ async def test_clean_dataset_writes_a_new_file(client, messy_copy: Path, spec_pl
     assert output.is_file()
     assert messy_copy.read_bytes() == original  # the input is untouched
     scores = (content["before"]["quality_score"], content["after"]["quality_score"])
-    assert scores == (77, 86)
+    assert scores == (77, 88)
     assert content["log"][-1]["action"] == "remove_duplicates"
 
     profiled = await client.call_tool("profile_dataset", {"file_path": str(output)})
-    assert profiled.structured_content["dataset"]["quality_score"] == 86
+    assert profiled.structured_content["dataset"]["quality_score"] == 88
 
 
 async def test_clean_dataset_inline_returns_the_data(client):

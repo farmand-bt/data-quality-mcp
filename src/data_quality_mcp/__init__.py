@@ -1,3 +1,3 @@
 """Data Quality MCP server: deterministic profiling and cleaning tools for AI agents."""
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"

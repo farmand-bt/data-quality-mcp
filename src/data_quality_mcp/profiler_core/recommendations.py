@@ -49,6 +49,24 @@ def generate_recommendations(
             }
         )
 
+    for key in duplicates.get("key_columns", []):
+        if key["conflicting_values"]:
+            rows = ", ".join(str(i) for i in key["sample_indices"][:5])
+            more = " ..." if key["conflicting_rows"] > 5 else ""
+            recs.append(
+                {
+                    "severity": "warning",
+                    "category": "duplicate",
+                    "column": key["column"],
+                    "message": (
+                        f"'{key['column']}' looks like a row identifier, but "
+                        f"{key['conflicting_values']:,} value(s) appear on rows "
+                        f"with different data (rows {rows}{more}): decide which "
+                        "record is correct before deduplicating."
+                    ),
+                }
+            )
+
     for pair in report["correlations"]["high_correlation_pairs"]:
         label = "Pearson r" if pair["method"] == "pearson" else "Cramér's V"
         recs.append(
@@ -88,6 +106,16 @@ def generate_recommendations(
                         f"{missing_pct:.1f}% of values are missing: consider "
                         "imputation or dropping."
                     ),
+                }
+            )
+
+        for association in info.get("missing_related_to") or []:
+            recs.append(
+                {
+                    "severity": "warning",
+                    "category": "missing",
+                    "column": col,
+                    "message": _association_message(col, association),
                 }
             )
 
@@ -137,6 +165,64 @@ def generate_recommendations(
                     ),
                 }
             )
+        if outliers and outliers.get("possible_sentinels"):
+            listed = ", ".join(
+                f"{_number(s['value'])} ({s['count']:,} rows)"
+                for s in outliers["possible_sentinels"]
+            )
+            recs.append(
+                {
+                    "severity": "warning",
+                    "category": "outlier",
+                    "column": col,
+                    "message": (
+                        f"'{col}' has extreme values that may be placeholder codes "
+                        f"rather than measurements: {listed}. Check with the data "
+                        "owner; values confirmed as codes can be set to missing "
+                        "with clean_dataset (handle_outliers, method 'sentinel', "
+                        "values [...])."
+                    ),
+                }
+            )
 
     recs.sort(key=lambda rec: _SEVERITY_ORDER[rec["severity"]])
     return recs
+
+
+def _number(value: float) -> str:
+    """-1000.0 -> "-1000", 1234567.5 -> "1234567.5": exact, so an agent can
+    copy it into clean_dataset's `values` (matched by float equality)."""
+    value = float(value)
+    return f"{value:.0f}" if value.is_integer() else repr(value)
+
+
+_ASSOCIATION_TEMPLATES = {
+    "point_biserial": (
+        "'{col}' is missing more often where '{other}' is {direction} "
+        "(point-biserial r = {value:.2f}, p < 0.001)."
+    ),
+    "cramers_v": (
+        "'{col}' is missing more often for some values of '{other}' "
+        "(Cramér's V = {value:.2f}, p < 0.001)."
+    ),
+    "missing_together": (
+        "'{col}' tends to be missing in the same rows as '{other}' "
+        "(phi = {value:.2f}, p < 0.001)."
+    ),
+}
+
+
+def _association_message(col: str, association: dict) -> str:
+    """An observation, not a verdict: the data can show that gaps go with
+    another column, not why (planning/milestone-3.5.md, D1)."""
+    other = association["column"]
+    observed = _ASSOCIATION_TEMPLATES[association["method"]].format(
+        col=col,
+        other=other,
+        direction="higher" if association["value"] > 0 else "lower",
+        value=association["value"],
+    )
+    return (
+        f"{observed} If the gaps depend on '{other}', a mean or median fill "
+        "would bias the column."
+    )

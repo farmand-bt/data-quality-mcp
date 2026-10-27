@@ -1,9 +1,11 @@
 """Pearson (numeric) and Cramér's V (categorical) associations.
 
 Ported from the Data Quality Analyzer (`profiler/correlations.py`) with the
-same formulas, threshold and ordering. Deviation (see planning/milestone-2.md):
-the numeric column count and categorical cardinality are bounded, to keep the
-result size and runtime predictable on wide data.
+same formulas, threshold and ordering. Deviations: the numeric column count and
+categorical cardinality are bounded, to keep the result size and runtime
+predictable on wide data (planning/milestone-2.md); a pair with fewer than
+`min_rows` rows holding both values is None, because two rows always give
+r = +/-1 (planning/milestone-3.5.md, D5).
 """
 
 import numpy as np
@@ -38,10 +40,12 @@ def compute_correlations(
     max_numeric_columns: int = config.MAX_CORRELATION_NUMERIC_COLUMNS,
     max_cramers_columns: int = config.MAX_CRAMERS_V_COLUMNS,
     max_cramers_cardinality: int = config.MAX_CRAMERS_V_CARDINALITY,
+    min_rows: int = config.MIN_CORRELATION_ROWS,
 ) -> CorrelationInfo:
     """Pearson matrix over numeric/mixed columns, Cramér's V over categorical
     and boolean columns (upper triangle), and every pair whose |value| reaches
-    `threshold`, strongest first."""
+    `threshold`, strongest first. A pair with fewer than `min_rows` rows where
+    both values are present is None and never a high pair."""
     numeric_cols = [
         c for c in df.columns if type_info[c]["inferred_type"] in _NUMERIC_TYPES
     ][:max_numeric_columns]
@@ -53,11 +57,15 @@ def compute_correlations(
     ][:max_cramers_columns]
 
     pearson: dict[str, dict[str, float | None]] = {}
-    cramers: dict[str, dict[str, float]] = {}
+    cramers: dict[str, dict[str, float | None]] = {}
     high_pairs: list[HighCorrelationPair] = []
 
     if len(numeric_cols) >= 2:
-        matrix = df[numeric_cols].apply(pd.to_numeric, errors="coerce").corr()
+        matrix = (
+            df[numeric_cols]
+            .apply(pd.to_numeric, errors="coerce")
+            .corr(min_periods=min_rows)
+        )
         for col_a in numeric_cols:
             pearson[col_a] = {
                 col_b: None
@@ -82,6 +90,10 @@ def compute_correlations(
         for i, col_a in enumerate(cat_cols):
             cramers[col_a] = {}
             for col_b in cat_cols[i + 1 :]:
+                shared = int((df[col_a].notna() & df[col_b].notna()).sum())
+                if shared < min_rows:
+                    cramers[col_a][col_b] = None
+                    continue
                 value = round(cramers_v(df[col_a], df[col_b]), 4)
                 cramers[col_a][col_b] = value
                 if value >= threshold:
