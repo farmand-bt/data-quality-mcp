@@ -94,7 +94,27 @@ The analyzer's "+5 clean-column bonus" was dropped in Milestone 1, because it co
 - **Duplicates:**
   - exact duplicates: `exact_count` is how many rows deduplication would remove
   - near-duplicates: rows identical on all columns but one, excluding exact duplicates, skipped above 50 columns. They're reported but not scored. Each cell is hashed once, and a row's "all columns but one" key is the wrapping sum of its column hashes minus one term, so each column needs only one cheap uint64 pass. Hash matches are confirmed on the real values, so the result is exactly the analyzer's definition (a randomized test checks this). At the limits (500k rows × 50 columns), this takes about 1.6 s, compared with 21.6 s for the per-column full-row passes.
-- **Correlations:** Pearson over the first 50 numeric columns, and Cramér's V (`scipy` χ², no bias correction) over the first 15 categorical/boolean columns with at most 50 distinct values. Pairs with |value| ≥ 0.9 are listed strongest first.
+- **Correlations:** Pearson over the first 50 numeric columns, and Cramér's V (`scipy` χ², no bias correction) over the first 15 categorical/boolean columns with at most 50 distinct values. A pair needs at least 10 rows with both values, otherwise it is `null` (two rows always give r = ±1). Pairs with |value| ≥ 0.9 are listed strongest first.
+
+## Heuristics added in Milestone 3.5
+
+Each one reports evidence, not a verdict, and was checked against the problems `scripts/generate_messy_data.py` injects ([milestone-3.5.md](../planning/milestone-3.5.md) has the measurements).
+
+- **What missing values go with** (`missing_related_to`, `profiler_core/missing.py`):
+  - **What is tested:** each column with gaps (the first 50) against numeric columns (point-biserial r), categorical/boolean columns (bias-corrected Cramér's V, rare categories left out) and other columns' missing indicators (positive phi). Each pair needs 10 missing and 10 present rows of its own.
+  - **What is listed:** |value| ≥ 0.3 and p < 0.001 / (pairs tested for that column), a Bonferroni correction.
+  - **Calibration:** under random gaps it listed nothing in any calibration run, up to about 100 comparison columns.
+  - **Limits:** it can't show that gaps are random (MCAR) or depend on the missing values themselves (MNAR), so no label is given. `null` means not tested, and `[]` means nothing found.
+- **Possible placeholder codes** (`possible_sentinels` in `OutlierInfo`, `profiler_core/outliers.py`):
+  - **The rule:** an IQR outlier that repeats on 2+ rows once exact duplicate rows are removed, in a column whose unique ratio is ≥ 0.5; or an integer of three or more 9s.
+  - **Limits:** a legitimate repeated extreme or a real 999 is listed too. A code inside the normal range, or in a column with few distinct values, is missed.
+  - **Cleaning:** happens only through `method: "sentinel"` with the codes the caller confirmed.
+- **Repeated IDs** (`key_columns` in `DuplicateInfo`, `profiler_core/duplicates.py`):
+  - **What counts as a key:** a column named `id`/`key`/`uuid`/`guid`, or ending in one after `_`, `-`, a space or a camelCase boundary. Its values must also be ≥ 95% distinct once exact duplicates are removed, which keeps foreign keys out.
+  - **What is reported:** IDs found on rows with different data.
+- **ISO dates in a CSV** (`type_detector.py`): text that is all ISO 8601, in one timezone convention, isn't a type mismatch for CSV input, which has no date type. The report builders get the format from the loader's extension. XLSX text dates, other formats and mixed formats stay mismatches.
+- **Not scored:** the score formula is unchanged. These findings describe values that are already scored (missing, outliers) or are judgement calls (repeated IDs).
+- **Speed:** at 500,000 × 10, `profile_dataset` takes about 3.8 s (3.0 s before Milestone 3.5). Type detection parses each distinct value once, and the deduplicated-row mask is computed once per report.
 
 ## Input
 
@@ -124,10 +144,11 @@ Nothing is written unless every earlier stage succeeded.
   - at most one step per action and column, as the analyzer's panel allows
   - no step on a column that `drop_column` removes
   - outlier steps only on columns where detection applies in the input
+  - `method: "sentinel"` needs `values`, each a possible sentinel of the input column, and doesn't combine with `cap_iqr`
   - `fill_constant` needs a value, and options with no effect are rejected
 
   Type-dependent rules are checked when their step runs:
-  - `fill_mean`/`fill_median` need numbers
+  - `fill_mean`/`fill_median` need at least one finite number, and use finite values only (Milestone 3.5)
   - `lowercase` needs a categorical column
   - `cap_iqr` needs at least 4 finite values
   - `fill_constant` values are converted to the column's type
@@ -142,7 +163,7 @@ Nothing is written unless every earlier stage succeeded.
   - **XLSX:** timezone-aware datetimes become naive UTC.
   - **Inline output** is capped at 1 MB of encoded text.
 
-At 500,000 rows × 10 columns, `clean_dataset` takes about 7 s (`profile_dataset` alone: about 3 s).
+At 500,000 rows × 10 columns, `clean_dataset` takes about 8 s, including two full reports (`profile_dataset` alone: about 4 s).
 
 ## MCP surface
 
