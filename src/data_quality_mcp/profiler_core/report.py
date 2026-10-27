@@ -182,8 +182,9 @@ def generate_report(
     )
     missing_info = analyze_missing(df)
     associations = missing_associations(df, type_info)
-    outliers = detect_outliers(df, type_info)
-    duplicates = analyze_duplicates(df)
+    kept = ~df.duplicated(keep="first")  # shared by the sections that need it
+    outliers = detect_outliers(df, type_info, kept=kept)
+    duplicates = analyze_duplicates(df, kept=kept)
     correlations = compute_correlations(df, type_info)
     inconsistent = {
         col

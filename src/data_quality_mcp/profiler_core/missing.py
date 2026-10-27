@@ -109,21 +109,22 @@ def _categorical_test(
     """Bias-corrected Cramér's V and chi-square p (no Yates' correction) over
     the rows where the category is present, leaving out categories with fewer
     than 5 rows; None when the pair doesn't qualify."""
-    present = categories.notna()
-    categories, missing = categories[present], missing[present]
-    counts = categories.value_counts()
-    common = categories.isin(counts[counts >= _MIN_CATEGORY_ROWS].index)
-    categories, missing = categories[common], missing[common]
-    n_missing = int(missing.sum())
-    if (
-        categories.nunique() < 2
-        or n_missing < min_rows
-        or len(missing) - n_missing < min_rows
-    ):
+    codes, _ = pd.factorize(categories)  # -1 where the category is missing
+    is_missing = missing.to_numpy(dtype=bool)
+    present = codes >= 0
+    codes, is_missing = codes[present], is_missing[present]
+    if len(codes) == 0:
         return None
-    table = pd.crosstab(missing, categories)
+    # The 2 x k table by counting codes (much faster than pd.crosstab)
+    k = int(codes.max()) + 1
+    table = np.bincount(codes + k * is_missing, minlength=2 * k).reshape(2, k)
+    table = table[:, table.sum(axis=0) >= _MIN_CATEGORY_ROWS]  # common categories
+    n_missing, n_present = int(table[1].sum()), int(table[0].sum())
+    if table.shape[1] < 2 or n_missing < min_rows or n_present < min_rows:
+        return None
     chi2, p = chi2_contingency(table, correction=False)[:2]
-    return corrected_cramers_v(float(chi2), len(missing), table.shape), float(p)
+    n = n_missing + n_present
+    return corrected_cramers_v(float(chi2), n, table.shape), float(p)
 
 
 def missing_associations(

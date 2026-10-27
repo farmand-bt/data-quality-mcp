@@ -83,6 +83,7 @@ def key_columns(
     *,
     min_unique_ratio: float = config.KEY_MIN_UNIQUE_RATIO,
     max_indices: int = config.MAX_REPORTED_INDICES,
+    kept: pd.Series | None = None,
 ) -> list[KeyColumnInfo]:
     """Identifier-like columns, and their values found on rows with different
     data (planning/milestone-3.5.md, D3).
@@ -94,14 +95,14 @@ def key_columns(
     duplicates, already in exact_count, aren't counted again. A key column
     with no conflicts is listed with zeros.
     """
-    if df.empty:
+    names = [(i, name) for i, name in enumerate(df.columns) if is_key_name(str(name))]
+    if df.empty or not names:
         return []
-    kept = df[~df.duplicated(keep="first")]
+    if kept is None:
+        kept = ~df.duplicated(keep="first")
     result: list[KeyColumnInfo] = []
-    for position, name in enumerate(df.columns):
-        if not is_key_name(str(name)):
-            continue
-        values = kept.iloc[:, position].dropna()
+    for position, name in names:
+        values = df.iloc[kept.to_numpy(), position].dropna()
         if len(values) == 0 or values.nunique() / len(values) < min_unique_ratio:
             continue
         repeated = values.duplicated(keep=False)
@@ -124,6 +125,7 @@ def analyze_duplicates(
     max_indices: int = config.MAX_REPORTED_INDICES,
     max_near_duplicate_columns: int = config.MAX_NEAR_DUPLICATE_COLUMNS,
     key_min_unique_ratio: float = config.KEY_MIN_UNIQUE_RATIO,
+    kept: pd.Series | None = None,
 ) -> DuplicateInfo:
     """Exact duplicates and near-duplicates (identical on all columns but one).
 
@@ -149,7 +151,9 @@ def analyze_duplicates(
         }
 
     in_group = df.duplicated(keep=False)  # every copy of a duplicated row
-    exact_count = int(df.duplicated(keep="first").sum())
+    if kept is None:
+        kept = ~df.duplicated(keep="first")
+    exact_count = int((~kept).sum())
     exact_rows = sorted(int(i) for i in in_group[in_group].index)
 
     near_rows: set[int] = set()
@@ -167,6 +171,9 @@ def analyze_duplicates(
         "indices_truncated": len(exact_rows) > max_indices
         or len(near_sorted) > max_indices,
         "key_columns": key_columns(
-            df, min_unique_ratio=key_min_unique_ratio, max_indices=max_indices
+            df,
+            min_unique_ratio=key_min_unique_ratio,
+            max_indices=max_indices,
+            kept=kept,
         ),
     }

@@ -101,11 +101,18 @@ def infer_type(
 
     # Only try datetimes when the column isn't mostly numeric-looking
     if numeric_ratio < 0.5:
-        datetime_ratio = float(parse_datetimes(non_null).notna().mean())
+        # Parse each distinct value once (in order of first appearance, so a
+        # fallback that infers the format from the first value sees the same
+        # one), then weight by how often it occurs: same ratio, far less work
+        # on repetitive columns
+        codes, uniques = pd.factorize(non_null)
+        parsed = parse_datetimes(pd.Series(uniques, dtype=object))
+        datetime_ratio = float(parsed.notna().to_numpy()[codes].mean())
         if datetime_ratio >= _DATETIME_THRESHOLD:
             # CSV has no date type, so ISO text is how a CSV stores dates
             # (planning/milestone-3.5.md, D4)
-            return "datetime", not (iso_dates_typed and _all_iso(non_null))
+            iso = iso_dates_typed and _all_iso(pd.Series(uniques, dtype=object))
+            return "datetime", not iso
 
     cardinality_ratio = non_null.nunique() / len(non_null)
     if cardinality_ratio <= high_cardinality_threshold:
@@ -115,7 +122,8 @@ def infer_type(
 
 def _all_iso(values: pd.Series) -> bool:
     """Every value is an ISO 8601 date or timestamp that parses, and either all
-    of them carry a timezone or none does (a mix is ambiguous)."""
+    of them carry a timezone or none does (a mix is ambiguous). Callers pass
+    the distinct values."""
     text = values.astype(str).str.strip()
     matches = text.str.fullmatch(_ISO_DATETIME.pattern, case=False)
     if not matches.all():

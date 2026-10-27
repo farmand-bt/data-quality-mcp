@@ -168,14 +168,17 @@ def detect_outliers(
     max_indices: int = config.MAX_REPORTED_INDICES,
     sentinel_min_unique_ratio: float = config.SENTINEL_MIN_UNIQUE_RATIO,
     max_sentinels: int | None = config.MAX_SENTINELS,
+    kept: pd.Series | None = None,
 ) -> dict[str, OutlierInfo | None]:
     """Return {column: OutlierInfo | None}; None for non-numeric columns.
 
     Indices are labels of `df.index`; callers pass a 0-based RangeIndex so
-    they are row positions.
+    they are row positions. `kept` is ~df.duplicated(keep="first"), computed
+    here when not given (the report computes it once for every section).
     """
     n_total = len(df)
-    kept = ~df.duplicated(keep="first")  # sentinel repeats ignore exact copies
+    if kept is None:
+        kept = ~df.duplicated(keep="first")  # sentinel repeats ignore exact copies
     result: dict[str, OutlierInfo | None] = {}
     for col in df.columns:
         if type_info[col]["inferred_type"] not in _NUMERIC_TYPES or n_total == 0:
