@@ -883,3 +883,117 @@ def test_step_count_bounds():
             filename_hint="x.csv",
             max_steps=2,
         )
+
+
+# --- finite-only fills (planning/milestone-3.5.md, D6) ---
+
+
+@pytest.mark.parametrize("strategy", ["fill_mean", "fill_median"])
+def test_fills_ignore_infinite_values(strategy):
+    df = pd.DataFrame({"x": [1.0, np.inf, np.nan, 3.0]})
+    step = {"action": "handle_missing", "column": "x", "strategy": strategy}
+    out, _ = run_steps(df, [step])
+    assert out["x"].iloc[2] == 2.0  # from 1 and 3, not inf
+    assert np.isinf(out["x"].iloc[1])  # inf itself is left alone
+
+
+def test_fill_on_a_column_with_only_infinite_values_is_rejected():
+    df = pd.DataFrame({"x": [np.inf, -np.inf, np.nan, np.inf]})
+    step = {"action": "handle_missing", "column": "x", "strategy": "fill_mean"}
+    with pytest.raises(InvalidInputError, match="at least one finite number"):
+        run_steps(df, [step])
+
+
+# --- cleaning confirmed sentinels (planning/milestone-3.5.md, D7) ---
+
+FIXTURE_CODES = [-1000, 5000, 9999999]
+
+
+def _sentinel_step(strategy="replace_nan", **extra) -> dict:
+    return {
+        "action": "handle_outliers",
+        "column": "price",
+        "strategy": strategy,
+        "method": "sentinel",
+        **extra,
+    }
+
+
+@pytest.fixture
+def messy_frame(messy_df) -> pd.DataFrame:
+    from data_quality_mcp.profiler_core.report import prepare_frame
+
+    return prepare_frame(messy_df, "file_path")
+
+
+def test_replace_nan_nulls_exactly_the_placeholder_cells(messy_frame):
+    out, log = run_steps(messy_frame, [_sentinel_step(values=FIXTURE_CODES)])
+    assert log[0]["values_nulled"] == 10 and log[0]["outliers_treated"] == 10
+    assert not out["price"].isin(FIXTURE_CODES).any()
+    assert out["price"].notna().sum() == messy_frame["price"].notna().sum() - 10
+
+
+def test_remove_drops_exactly_the_placeholder_rows(messy_frame):
+    out, log = run_steps(messy_frame, [_sentinel_step("remove", values=FIXTURE_CODES)])
+    assert log[0]["rows_removed"] == 10
+    assert len(out) == len(messy_frame) - 10
+
+
+def test_only_the_confirmed_values_are_cleaned(messy_frame):
+    _, log = run_steps(messy_frame, [_sentinel_step(values=[5000])])
+    assert log[0]["values_nulled"] == 4
+
+
+def test_an_integer_value_matches_a_text_numeric_column():
+    values = [str(v) for v in np.random.default_rng(0).normal(100, 10, 200).round(2)]
+    df = pd.DataFrame({"x": values + ["5000", "5000", "TBD"], "row": range(203)})
+    step = {**_sentinel_step(values=[5000]), "column": "x"}
+    out, log = run_steps(df, [step])
+    assert log[0]["values_nulled"] == 2
+
+
+def test_a_candidate_beyond_the_reported_ten_can_be_cleaned():
+    rng = np.random.default_rng(1)
+    codes = [-1000.0 - i for i in range(12) for _ in range(2)]
+    df = pd.DataFrame({"x": list(rng.normal(100, 10, 400).round(2)) + codes})
+    df["row"] = range(len(df))
+    step = {**_sentinel_step(values=[-1011.0]), "column": "x"}  # 12th by value
+    _, log = run_steps(df, [step])
+    assert log[0]["values_nulled"] == 2
+
+
+def test_a_value_that_is_not_a_candidate_is_rejected(messy_frame):
+    with pytest.raises(InvalidInputError, match="isn't a possible sentinel") as exc:
+        run_steps(messy_frame, [_sentinel_step(values=[1234])])
+    assert "-1000, 5000, 9999999" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    ("step", "message"),
+    [
+        (_sentinel_step("cap_iqr", values=FIXTURE_CODES), "doesn't work with cap_iqr"),
+        (_sentinel_step(), "needs 'values'"),
+        (_sentinel_step(values=[]), "needs 'values'"),
+        (_sentinel_step(values=list(range(11))), "needs 'values'"),
+        (_sentinel_step(values=[True]), "finite numbers"),
+        (_sentinel_step(values=[float("nan")]), "finite numbers"),
+        ({**_sentinel_step(values=[5000]), "method": "iqr"}, "only applies to method"),
+    ],
+)
+def test_sentinel_step_validation(messy_frame, step, message):
+    with pytest.raises(InvalidInputError, match=message):
+        run_steps(messy_frame, [step])
+
+
+def test_candidates_come_from_the_original_input(messy_frame):
+    # The fill runs before the sentinel step and changes the column, and
+    # remove_duplicates runs after it; the codes are checked against the input,
+    # as outlier rows are (M3 D5), so the plan's order doesn't change them
+    steps = [
+        {"action": "remove_duplicates"},
+        {"action": "handle_missing", "column": "price", "strategy": "fill_median"},
+        _sentinel_step(values=FIXTURE_CODES),
+    ]
+    out, log = run_steps(messy_frame, steps)
+    assert not out["price"].isin(FIXTURE_CODES).any()
+    assert {e["action"]: e for e in log}["handle_outliers"]["outliers_treated"] == 10
