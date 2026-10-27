@@ -213,11 +213,11 @@ async def test_clean_dataset_writes_a_new_file(client, messy_copy: Path, spec_pl
     assert output.is_file()
     assert messy_copy.read_bytes() == original  # the input is untouched
     scores = (content["before"]["quality_score"], content["after"]["quality_score"])
-    assert scores == (77, 86)
+    assert scores == (77, 88)
     assert content["log"][-1]["action"] == "remove_duplicates"
 
     profiled = await client.call_tool("profile_dataset", {"file_path": str(output)})
-    assert profiled.structured_content["dataset"]["quality_score"] == 86
+    assert profiled.structured_content["dataset"]["quality_score"] == 88
 
 
 async def test_clean_dataset_inline_returns_the_data(client):

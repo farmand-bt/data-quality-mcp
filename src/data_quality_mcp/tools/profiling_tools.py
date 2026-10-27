@@ -9,7 +9,6 @@ reported generically by the SDK.
 from collections.abc import Callable
 from typing import TypeVar
 
-import pandas as pd
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
@@ -45,13 +44,15 @@ def _run(
     file_path: str | None,
     inline_content: str | None,
     filename_hint: str | None,
-    build: Callable[[pd.DataFrame, str, str], T],
+    build: Callable[..., T],
 ) -> T:
     """Load the input and pass it to a core report builder, mapping domain
     errors to ToolError so the agent sees an actionable message."""
     try:
         loaded = load_input(file_path, inline_content, filename_hint)
-        return build(loaded.df, loaded.name, loaded.source)
+        return build(
+            loaded.df, loaded.name, loaded.source, input_format=loaded.extension
+        )
     except DataQualityError as exc:
         raise ToolError(str(exc)) from exc
 

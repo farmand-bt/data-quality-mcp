@@ -28,6 +28,20 @@ OUTLIER_IQR_MULTIPLIER = 1.5
 OUTLIER_ZSCORE_THRESHOLD = 3.0  # classic |x - mean| / std, as in the analyzer
 OUTLIER_COLUMN_WARNING_PCT = 5.0  # Column warning when IQR outliers exceed this %
 HIGH_CORRELATION_THRESHOLD = 0.9
+MIN_CORRELATION_ROWS = 10  # A correlation needs this many rows with both values
+
+# --- Heuristics added in Milestone 3.5 (see planning/milestone-3.5.md) ---
+# Missing-value associations (D1): which observed columns go with a column's gaps
+MAX_MISSING_PATTERN_COLUMNS = 50  # Columns with missing values that are tested
+MIN_MISSING_PATTERN_ROWS = 10  # Missing and present rows each pair needs
+MISSING_ASSOCIATION_THRESHOLD = 0.3  # Minimum |r|, Cramér's V or phi to list
+MISSING_ASSOCIATION_MAX_P = 0.001  # Divided by the pairs tested (Bonferroni)
+MAX_MISSING_ASSOCIATIONS = 5  # Listed per column, strongest first
+# Possible sentinel (placeholder) values among the outliers (D2)
+SENTINEL_MIN_UNIQUE_RATIO = 0.5  # The repeat test skips columns below this
+MAX_SENTINELS = 10  # Listed per column
+# Identifier columns whose values repeat with different data (D3)
+KEY_MIN_UNIQUE_RATIO = 0.95  # Nearly unique, so foreign keys are left out
 
 # --- Result-size and runtime bounds (keep tool results small for agents) ---
 MAX_REPORTED_INDICES = 50  # Row-index lists are capped; counts stay exact

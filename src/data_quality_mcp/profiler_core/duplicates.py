@@ -3,14 +3,28 @@
 Ported from the Data Quality Analyzer (`profiler/duplicates.py`) with the same
 definitions. Deviations (see planning/milestone-2.md): index samples are
 sorted for deterministic output and both lists share one cap, reported via
-`indices_truncated`.
+`indices_truncated`. Added in Milestone 3.5 (D3): `key_columns`, identifier
+columns whose values repeat on rows with different data.
 """
+
+import re
 
 import numpy as np
 import pandas as pd
 
 from data_quality_mcp import config
-from data_quality_mcp.profiler_core.schema import DuplicateInfo
+from data_quality_mcp.profiler_core.schema import DuplicateInfo, KeyColumnInfo
+
+# A key column's name: exactly id/key/uuid/guid in any case, or ending in one
+# after _ - or a space (any case), or after a camelCase boundary (a lowercase
+# letter or digit, then the word with a capital: orderKey, CustomerID). The
+# boundary needs that change of case, so "paid", "valid" and "ORDERID" don't
+# match.
+_KEY_WORD = r"(?:id|key|uuid|guid)"
+_KEY_NAME = re.compile(
+    rf"(?i:^{_KEY_WORD}$|[_\-\s]{_KEY_WORD}$)"
+    r"|(?<=[a-z0-9])(?:Id|ID|Key|KEY|Uuid|UUID|Guid|GUID)$"
+)
 
 # Odd multipliers make each column's hash contribution distinct, so rows whose
 # values are merely permuted across columns rarely produce the same key.
@@ -59,11 +73,57 @@ def _near_duplicate_rows(df: pd.DataFrame) -> set[int]:
     return rows
 
 
+def is_key_name(name: str) -> bool:
+    """Whether a column name says it's an identifier (see _KEY_NAME)."""
+    return _KEY_NAME.search(name.strip()) is not None
+
+
+def key_columns(
+    df: pd.DataFrame,
+    *,
+    min_unique_ratio: float = config.KEY_MIN_UNIQUE_RATIO,
+    max_indices: int = config.MAX_REPORTED_INDICES,
+) -> list[KeyColumnInfo]:
+    """Identifier-like columns, and their values found on rows with different
+    data (planning/milestone-3.5.md, D3).
+
+    A key column has a key-like name and, on the rows left after
+    drop_duplicates(keep="first"), at least `min_unique_ratio` distinct
+    non-null values (so foreign keys, which repeat by design, are left out).
+    Conflicts are counted on those rows with null keys ignored, so exact
+    duplicates, already in exact_count, aren't counted again. A key column
+    with no conflicts is listed with zeros.
+    """
+    if df.empty:
+        return []
+    kept = df[~df.duplicated(keep="first")]
+    result: list[KeyColumnInfo] = []
+    for position, name in enumerate(df.columns):
+        if not is_key_name(str(name)):
+            continue
+        values = kept.iloc[:, position].dropna()
+        if len(values) == 0 or values.nunique() / len(values) < min_unique_ratio:
+            continue
+        repeated = values.duplicated(keep=False)
+        rows = sorted(int(i) for i in values.index[repeated.to_numpy()])
+        result.append(
+            {
+                "column": str(name),
+                "conflicting_values": int(values[repeated].nunique()),
+                "conflicting_rows": len(rows),
+                "sample_indices": rows[:max_indices],
+                "indices_truncated": len(rows) > max_indices,
+            }
+        )
+    return result
+
+
 def analyze_duplicates(
     df: pd.DataFrame,
     *,
     max_indices: int = config.MAX_REPORTED_INDICES,
     max_near_duplicate_columns: int = config.MAX_NEAR_DUPLICATE_COLUMNS,
+    key_min_unique_ratio: float = config.KEY_MIN_UNIQUE_RATIO,
 ) -> DuplicateInfo:
     """Exact duplicates and near-duplicates (identical on all columns but one).
 
@@ -85,6 +145,7 @@ def analyze_duplicates(
             "near_duplicate_pct": 0.0,
             "near_sample_indices": [],
             "indices_truncated": False,
+            "key_columns": [],
         }
 
     in_group = df.duplicated(keep=False)  # every copy of a duplicated row
@@ -105,4 +166,7 @@ def analyze_duplicates(
         "near_sample_indices": near_sorted[:max_indices],
         "indices_truncated": len(exact_rows) > max_indices
         or len(near_sorted) > max_indices,
+        "key_columns": key_columns(
+            df, min_unique_ratio=key_min_unique_ratio, max_indices=max_indices
+        ),
     }

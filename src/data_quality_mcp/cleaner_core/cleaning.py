@@ -88,7 +88,9 @@ def run_cleaning(
     )
     extension = extension or loaded.extension
     df = prepare_frame(loaded.df, loaded.source)
-    before = quality_snapshot(generate_report(df, loaded.name, loaded.source))
+    before = quality_snapshot(
+        generate_report(df, loaded.name, loaded.source, input_format=loaded.extension)
+    )
 
     cleaned, log = run_steps(
         df, steps, iqr_multiplier=iqr_multiplier, zscore_threshold=zscore_threshold
@@ -107,7 +109,9 @@ def run_cleaning(
             f"The cleaned data would be too large as {extension} ({exc}) Choose a "
             ".csv output_path instead."
         ) from exc
-    after = quality_snapshot(generate_report(reloaded, loaded.name, loaded.source))
+    after = quality_snapshot(
+        generate_report(reloaded, loaded.name, loaded.source, input_format=extension)
+    )
 
     if loaded.source == "file_path":  # written last: only once all else succeeded
         written = write_output(

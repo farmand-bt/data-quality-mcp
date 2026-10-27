@@ -15,7 +15,10 @@ from data_quality_mcp.profiler_core.correlations import compute_correlations
 from data_quality_mcp.profiler_core.duplicates import analyze_duplicates
 from data_quality_mcp.profiler_core.exceptions import InvalidInputError
 from data_quality_mcp.profiler_core.json_safe import to_json_safe
-from data_quality_mcp.profiler_core.missing import analyze_missing
+from data_quality_mcp.profiler_core.missing import (
+    analyze_missing,
+    missing_associations,
+)
 from data_quality_mcp.profiler_core.outliers import detect_outliers, outlier_score_pct
 from data_quality_mcp.profiler_core.recommendations import generate_recommendations
 from data_quality_mcp.profiler_core.schema import (
@@ -145,6 +148,12 @@ def quality_snapshot(report: DatasetReport) -> QualitySnapshot:
     }
 
 
+def _iso_dates_typed(input_format: str | None) -> bool:
+    """CSV has no date type, so ISO date text isn't a type mismatch there
+    (planning/milestone-3.5.md, D4). Without a known format, keep the M1 rule."""
+    return (input_format or "").lower().lstrip(".") == "csv"
+
+
 def _summary(df: pd.DataFrame, name: str, source: str) -> DatasetSummary:
     return {"name": name, "source": source, "rows": len(df), "columns": len(df.columns)}
 
@@ -158,11 +167,21 @@ def generate_report(
     high_cardinality_threshold: float = config.HIGH_CARDINALITY_THRESHOLD,
     grade_thresholds: Mapping[str, int] = config.QUALITY_GRADE_THRESHOLDS,
     outlier_warning_pct: float = config.OUTLIER_COLUMN_WARNING_PCT,
+    input_format: str | None = None,
 ) -> DatasetReport:
-    """Profile `df` and return a JSON-safe report matching `DatasetReport`."""
+    """Profile `df` and return a JSON-safe report matching `DatasetReport`.
+
+    `input_format` is the file format the data came from (".csv" or ".xlsx");
+    for CSV, ISO date text counts as typed.
+    """
     df = prepare_frame(df, source)
-    type_info = detect_types(df, high_cardinality_threshold=high_cardinality_threshold)
+    type_info = detect_types(
+        df,
+        high_cardinality_threshold=high_cardinality_threshold,
+        iso_dates_typed=_iso_dates_typed(input_format),
+    )
     missing_info = analyze_missing(df)
+    associations = missing_associations(df, type_info)
     outliers = detect_outliers(df, type_info)
     duplicates = analyze_duplicates(df)
     correlations = compute_correlations(df, type_info)
@@ -183,6 +202,7 @@ def generate_report(
             "type_mismatch": type_info[col]["type_mismatch"],
             "missing_count": col_missing["missing_count"],
             "missing_pct": col_missing["missing_pct"],
+            "missing_related_to": associations[col],
             "stats": stats,
             "outliers": outliers[col],
             "warnings": _column_warnings(
@@ -230,10 +250,15 @@ def outlier_report(
     source: str,
     *,
     high_cardinality_threshold: float = config.HIGH_CARDINALITY_THRESHOLD,
+    input_format: str | None = None,
 ) -> OutlierResult:
     """Dataset summary plus per-column outliers (None where not applicable)."""
     df = prepare_frame(df, source)
-    type_info = detect_types(df, high_cardinality_threshold=high_cardinality_threshold)
+    type_info = detect_types(
+        df,
+        high_cardinality_threshold=high_cardinality_threshold,
+        iso_dates_typed=_iso_dates_typed(input_format),
+    )
     return to_json_safe(
         {
             "dataset": _summary(df, name, source),
@@ -242,8 +267,12 @@ def outlier_report(
     )
 
 
-def duplicate_report(df: pd.DataFrame, name: str, source: str) -> DuplicateResult:
-    """Dataset summary plus exact and near-duplicate rows."""
+def duplicate_report(
+    df: pd.DataFrame, name: str, source: str, *, input_format: str | None = None
+) -> DuplicateResult:
+    """Dataset summary plus exact and near-duplicate rows and key-column
+    conflicts. (`input_format` is accepted for a uniform call; types aren't
+    used here.)"""
     df = prepare_frame(df, source)
     return to_json_safe(
         {"dataset": _summary(df, name, source), "duplicates": analyze_duplicates(df)}
@@ -256,10 +285,15 @@ def correlation_report(
     source: str,
     *,
     high_cardinality_threshold: float = config.HIGH_CARDINALITY_THRESHOLD,
+    input_format: str | None = None,
 ) -> CorrelationResult:
     """Dataset summary plus Pearson / Cramér's V correlations."""
     df = prepare_frame(df, source)
-    type_info = detect_types(df, high_cardinality_threshold=high_cardinality_threshold)
+    type_info = detect_types(
+        df,
+        high_cardinality_threshold=high_cardinality_threshold,
+        iso_dates_typed=_iso_dates_typed(input_format),
+    )
     return to_json_safe(
         {
             "dataset": _summary(df, name, source),

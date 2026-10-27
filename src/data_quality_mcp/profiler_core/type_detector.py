@@ -4,6 +4,7 @@ Ported and simplified from the Data Quality Analyzer. Works with both pandas 2
 (strings stored as `object`) and pandas 3 (strings stored as `str`).
 """
 
+import re
 import warnings
 
 import numpy as np
@@ -15,6 +16,13 @@ from data_quality_mcp import config
 _NUMERIC_THRESHOLD = 0.80
 _DATETIME_THRESHOLD = 0.80
 _BOOL_VALUES = {"true", "false", "yes", "no", "y", "n"}
+# ISO 8601 date, optionally with a time and then a timezone (Z or +HH:MM); the
+# timezone can only follow a time, so "2020-01-15" never reads as an offset
+_ISO_DATETIME = re.compile(
+    r"\d{4}-\d{2}-\d{2}"
+    r"(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?P<tz>Z|[+-]\d{2}:\d{2})?)?",
+    re.IGNORECASE,
+)
 
 
 def parse_datetimes(series: pd.Series) -> pd.Series:
@@ -52,12 +60,15 @@ def infer_type(
     series: pd.Series,
     *,
     high_cardinality_threshold: float = config.HIGH_CARDINALITY_THRESHOLD,
+    iso_dates_typed: bool = False,
 ) -> tuple[str, bool]:
     """Return (inferred_type, type_mismatch) for a single column.
 
     inferred_type is one of: numeric, categorical, datetime, boolean, text, mixed.
     type_mismatch is True when the values' semantic type differs from how they
-    are stored (e.g. numbers stored as strings).
+    are stored (e.g. numbers stored as strings). With `iso_dates_typed` (set
+    for CSV input, which has no date type), text whose values are all ISO 8601
+    dates in one timezone convention is not a mismatch.
     """
     dtype = series.dtype
 
@@ -92,7 +103,9 @@ def infer_type(
     if numeric_ratio < 0.5:
         datetime_ratio = float(parse_datetimes(non_null).notna().mean())
         if datetime_ratio >= _DATETIME_THRESHOLD:
-            return "datetime", True
+            # CSV has no date type, so ISO text is how a CSV stores dates
+            # (planning/milestone-3.5.md, D4)
+            return "datetime", not (iso_dates_typed and _all_iso(non_null))
 
     cardinality_ratio = non_null.nunique() / len(non_null)
     if cardinality_ratio <= high_cardinality_threshold:
@@ -100,16 +113,35 @@ def infer_type(
     return "text", False
 
 
+def _all_iso(values: pd.Series) -> bool:
+    """Every value is an ISO 8601 date or timestamp that parses, and either all
+    of them carry a timezone or none does (a mix is ambiguous)."""
+    text = values.astype(str).str.strip()
+    matches = text.str.fullmatch(_ISO_DATETIME.pattern, case=False)
+    if not matches.all():
+        return False
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        parsed = pd.to_datetime(text, format="ISO8601", utc=True, errors="coerce")
+    if parsed.isna().any():
+        return False
+    has_tz = text.str.extract(_ISO_DATETIME, expand=True)["tz"].notna()
+    return bool(has_tz.all() or not has_tz.any())
+
+
 def detect_types(
     df: pd.DataFrame,
     *,
     high_cardinality_threshold: float = config.HIGH_CARDINALITY_THRESHOLD,
+    iso_dates_typed: bool = False,
 ) -> dict[str, dict]:
     """Return {column: {"pandas_dtype", "inferred_type", "type_mismatch"}}."""
     result = {}
     for col in df.columns:
         inferred_type, type_mismatch = infer_type(
-            df[col], high_cardinality_threshold=high_cardinality_threshold
+            df[col],
+            high_cardinality_threshold=high_cardinality_threshold,
+            iso_dates_typed=iso_dates_typed,
         )
         result[col] = {
             "pandas_dtype": str(df[col].dtype),

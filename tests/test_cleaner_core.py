@@ -798,7 +798,7 @@ def test_spec_plan_figures(messy_copy, spec_plan):
         "columns": 10,
         "missing_cells": 202,
         "exact_duplicates": 0,
-        "quality_score": 86,  # CSV: sale_date reads back as text (D8)
+        "quality_score": 88,  # ISO dates in a CSV are typed (M3.5 D4; was 86)
         "quality_grade": "B",
     }
     log = {(e["action"], e["column"]): e for e in result["log"]}
@@ -813,7 +813,9 @@ def test_spec_plan_figures(messy_copy, spec_plan):
 def test_after_matches_profiling_the_written_file(messy_copy, spec_plan):
     result = run_cleaning(spec_plan, file_path=str(messy_copy))
     written = Path(result["output"]["path"])
-    report = generate_report(pd.read_csv(written), written.name, "file_path")
+    report = generate_report(
+        pd.read_csv(written), written.name, "file_path", input_format=".csv"
+    )
     assert result["after"]["quality_score"] == report["dataset"]["quality_score"]
 
 
@@ -835,7 +837,7 @@ def test_inline_input_returns_content(messy_path, spec_plan):
     assert result["output"]["path"] is None
     returned = pd.read_csv(io.StringIO(result["output"]["content"]))
     assert len(returned) == 487
-    assert result["after"]["quality_score"] == 86
+    assert result["after"]["quality_score"] == 88
 
 
 def test_nothing_is_written_when_a_step_fails(messy_copy):
