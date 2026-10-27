@@ -46,6 +46,8 @@ The cleaning handlers are **ported from `llm-data-quality-analyzer` with the sam
 | UNC and device paths *(this repo's M1/M2 loader, not the analyzer)* | the profiling tools accepted any `file_path` | rejected on Windows for `file_path` and `output_path` (D2). This also blocks `\\?\C:\...` long paths. `ALLOW_NETWORK_PATHS` opts back in; POSIX is unaffected | Avoids NTLM credential leaks over SMB when untrusted data steers an agent |
 | Spreadsheet formula injection | cells starting with `=`, `+`, `-` or `@` are written as-is | the same: no escaping (out of scope) | Escaping would alter data, e.g. negative numbers stored as text. The README trust note warns that a cleaned file from untrusted data can contain live formulas when opened in Excel |
 | Missing-value pattern classification | present | still not ported (D9) | Measured mislabelling; separate spec |
+| Timestamps with mixed UTC offsets, profiling *(bug, fixed in 0.3.1)* | not typed as datetime: its parsing gives up | parsed to UTC, so the column is `datetime` (a type mismatch, as text) with UTC min/max | This repo's M1 parsing crashed here; port back |
+| `fix_type` → `datetime` with mixed UTC offsets *(bug, fixed in 0.3.1)* | crashes (pandas 3); unreachable from its UI, which never offers the conversion for such a column | converted to UTC, which keeps every instant; a mix of values with and without a timezone is rejected instead of guessed; values that don't parse become null | Correctness; port back |
 
 ---
 
@@ -223,3 +225,4 @@ Merging this spec also approves one change to `CLAUDE.md`. The cleaning rule und
   - `cap_iqr` with fewer than 4 finite values is an error. The analyzer would clip with NaN fences, which does nothing.
 - **Tests:** 425 pass on Python 3.12 / pandas 3 and on Python 3.10 / pandas 2, with 98% coverage. They include the analyzer's cleaner tests in `TestAnalyzerParity*` classes, the three bug fixes, every D6 rule, the writer guarantees and inline input.
 - **Version:** 0.3.0.
+- **Fixed after release (0.3.1):** timestamps with different UTC offsets (e.g. `…Z` and `…+02:00`) crashed `profile_dataset`, because pandas 3 raises "Mixed timezones detected". See the last two rows of the Deviations table. Timezone-awareness is decided by parsing each distinct value, not by pattern, so `15-Jan-2020` counts as naive and `+02` and `UTC` count as offsets.

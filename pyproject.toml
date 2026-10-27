@@ -1,6 +1,6 @@
 [project]
 name = "data-quality-mcp"
-version = "0.3.0"
+version = "0.3.1"
 description = "MCP server exposing deterministic dataset profiling and cleaning as tools for AI agents"
 readme = "README.md"
 license = "MIT"
