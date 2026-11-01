@@ -250,10 +250,12 @@ New settings in `config.py`, each passed to the core as a keyword parameter:
   1. a bool becomes `"true"` or `"false"`. It is checked first, because `bool` is a subclass of `int` and output validation would turn `True` into `1`.
   2. an integer (Python or numpy) stays an integer, at full precision
   3. ±infinity becomes `"inf"` or `"-inf"`. Strict JSON has no infinity, and `to_json_safe` would make it `null`, which the field's type rejects. Detection and counts are unchanged, so two `inf` IDs still count as one conflicting value.
-  4. a float with no fractional part becomes an integer (an ID column with gaps is read as float, so 484 would otherwise show as 484.0)
+  4. a float with no fractional part and an absolute value below 2**53 becomes an integer (an ID column with gaps is read as float, so 484 would otherwise show as 484.0). Larger floats stay floats. Above 2**53 a float may already have lost digits, so printing it as an integer would claim a precision it doesn't have (and `1e300` would become a 301-digit number).
   5. any other float stays a float
   6. a string stays a string
   7. anything else (a timestamp, for example) becomes a string: `to_json_safe`'s form when that is a string (ISO 8601 for a timestamp), otherwise `str(value)`
+
+  This is lossy in one accepted way: a stored string `"inf"`, `"true"` or `"2024-01-01T00:00:00"` looks the same as a converted infinity, bool or timestamp, in the field and in the message. The row positions say where to look, and the type is visible there.
 - **Not changed:** detection, the uniqueness gate, `conflicting_values`, `conflicting_rows`, `sample_indices` and scoring (D8).
 
 **Recommendation wording** (supersedes D3's and As built's):
@@ -298,13 +300,14 @@ class KeyColumnInfo(TypedDict):      # + one field
    - the `find_duplicates` and `profile_dataset` docstrings
    - the overview's description of `key_columns` and its schema example
    - `docs/architecture.md`
-   - an As built for this amendment
+   - an As built for this amendment, and the status line at the top marked as implemented
    - `prompts.py` mentions conflicting values only in general, so it needs no change
 6. **Tests:**
    - the fixture gives `sample_values == [484]`, and the recommendation names 484 and "0-based row positions 13, 65"
    - a float ID column with gaps gives integers; string IDs give strings; a non-integral float stays a float
    - two `inf` IDs give `"inf"`, the message quotes it, and both tools' output passes validation and strict JSON (`allow_nan=False`)
    - an integer ID above 2**53 (`9007199254740993`) keeps every digit, in the field and in the message
+   - a float ID of `1e20` or more with no fractional part stays a float
    - bools give `"true"`/`"false"`, and a timestamp ID gives its ISO 8601 string
    - order follows the first conflicting row, not the value
    - 12 conflicting values give 10, with `conflicting_values == 12`
