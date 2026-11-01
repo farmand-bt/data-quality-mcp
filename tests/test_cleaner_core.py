@@ -977,6 +977,7 @@ def test_a_value_that_is_not_a_candidate_is_rejected(messy_frame):
         (_sentinel_step(values=list(range(11))), "needs 'values'"),
         (_sentinel_step(values=[True]), "finite numbers"),
         (_sentinel_step(values=[float("nan")]), "finite numbers"),
+        (_sentinel_step(values=[10**400]), "finite numbers"),  # CI review
         ({**_sentinel_step(values=[5000]), "method": "iqr"}, "only applies to method"),
     ],
 )

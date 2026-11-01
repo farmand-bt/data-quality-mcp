@@ -232,12 +232,14 @@ def _validate_sentinel_values(
             "(detect_outliers or profile_dataset)."
         )
     for value in values:
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(value)
-        ):
-            raise InvalidInputError(f"'values' must be finite numbers, got {value!r}.")
+        try:
+            # float() also catches an int too large for a float (10**400)
+            finite = math.isfinite(float(value))
+        except (TypeError, ValueError, OverflowError):
+            finite = False
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not finite:
+            shown = repr(value) if len(repr(value)) <= 40 else repr(value)[:40] + "..."
+            raise InvalidInputError(f"'values' must be finite numbers, got {shown}.")
 
 
 def _number(value: float) -> str:

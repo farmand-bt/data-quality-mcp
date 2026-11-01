@@ -90,7 +90,7 @@ async def test_clean_dataset_schema_and_annotations(client):
     }
 
 
-@pytest.mark.parametrize("values", [[True], ["5000"]])
+@pytest.mark.parametrize("values", [[True], ["5000"], [10**400]])
 async def test_sentinel_values_are_not_coerced(client, messy_copy: Path, values):
     # Lax validation would turn true into 1.0 and "5000" into 5000.0
     step = {
@@ -104,6 +104,8 @@ async def test_sentinel_values_are_not_coerced(client, messy_copy: Path, values)
         "clean_dataset", {"steps": [step], "file_path": str(messy_copy)}
     )
     assert result.is_error is True
+    if values == [10**400]:  # strict float rejects it here; the core checks too
+        assert "values" in result.content[0].text
     assert [p.name for p in messy_copy.parent.iterdir()] == ["messy_sample.csv"]
 
 
