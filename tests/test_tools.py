@@ -133,10 +133,42 @@ async def test_new_report_fields_reach_the_agent(client, messy_path: Path):
     )
     assert len(report["columns"]["price"]["outliers"]["possible_sentinels"]) == 3
     assert report["duplicates"]["key_columns"][0]["sample_indices"] == [13, 65]
+    assert report["duplicates"]["key_columns"][0]["sample_values"] == [484]
     outliers = (
         await client.call_tool("detect_outliers", {"file_path": str(messy_path)})
     ).structured_content
     assert outliers["outliers"]["price"]["possible_sentinels"][0]["value"] == -1000.0
+
+
+async def test_key_sample_values_pass_output_validation(client, tmp_path):
+    # inf would be null under to_json_safe, which the field's type rejects;
+    # "007" must stay a string, 484 an integer
+    path = tmp_path / "keys.csv"
+    rows = ["inf", "inf"] + [str(i) for i in range(60)]
+    path.write_text("id,x\n" + "".join(f"{v},{i}\n" for i, v in enumerate(rows)))
+    text_path = tmp_path / "text_keys.csv"
+    text_rows = ["007", "007"] + [f"k{i}" for i in range(60)]
+    text_path.write_text(
+        "id,x\n" + "".join(f"{v},{i}\n" for i, v in enumerate(text_rows))
+    )
+    for file, expected in ((path, ["inf"]), (text_path, ["007"])):
+        for tool in ("find_duplicates", "profile_dataset"):
+            result = await client.call_tool(tool, {"file_path": str(file)})
+            assert result.is_error is False, (tool, file)
+            content = result.structured_content
+            (key,) = content["duplicates"]["key_columns"]
+            assert key["sample_values"] == expected, (tool, file)
+            json.dumps(content, allow_nan=False)
+
+
+async def test_key_sample_values_are_in_the_output_schema(client):
+    tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+    for name in ("find_duplicates", "profile_dataset"):
+        key_schema = tools[name].output_schema["$defs"]["KeyColumnInfo"]
+        items = key_schema["properties"]["sample_values"]["items"]
+        assert items == {
+            "anyOf": [{"type": "integer"}, {"type": "number"}, {"type": "string"}]
+        }, name
 
 
 @pytest.mark.parametrize("name", ["dates.CSV", "dates.csv"])

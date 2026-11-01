@@ -42,6 +42,7 @@ SENTINEL_MIN_UNIQUE_RATIO = 0.5  # The repeat test skips columns below this
 MAX_SENTINELS = 10  # Listed per column
 # Identifier columns whose values repeat with different data (D3)
 KEY_MIN_UNIQUE_RATIO = 0.95  # Nearly unique, so foreign keys are left out
+MAX_KEY_SAMPLE_VALUES = 10  # Conflicting key values listed per column
 
 # --- Result-size and runtime bounds (keep tool results small for agents) ---
 MAX_REPORTED_INDICES = 50  # Row-index lists are capped; counts stay exact

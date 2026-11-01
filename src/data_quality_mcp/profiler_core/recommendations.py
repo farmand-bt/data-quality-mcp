@@ -6,6 +6,7 @@ an added `consistency` category for inconsistent category labels, which this
 server reports as a warning rather than as a type mismatch.
 """
 
+import json
 from collections.abc import Collection
 
 from data_quality_mcp import config
@@ -51,27 +52,12 @@ def generate_recommendations(
 
     for key in duplicates.get("key_columns", []):
         if key["conflicting_values"]:
-            rows = ", ".join(str(i) for i in key["sample_indices"][:5])
-            more = " ..." if key["conflicting_rows"] > 5 else ""
-            # Spell out the count: "1 value(s) appear" read like "value 1" to a
-            # model in manual testing
-            n = key["conflicting_values"]
-            shared = (
-                "one of its values is shared"
-                if n == 1
-                else f"{n:,} of its values are each shared"
-            )
             recs.append(
                 {
                     "severity": "warning",
                     "category": "duplicate",
                     "column": key["column"],
-                    "message": (
-                        f"'{key['column']}' looks like a row identifier, but "
-                        f"{shared} by rows with different data (rows "
-                        f"{rows}{more}): compare those rows and decide which "
-                        "record is correct before deduplicating."
-                    ),
+                    "message": _key_message(key),
                 }
             )
 
@@ -218,6 +204,43 @@ _ASSOCIATION_TEMPLATES = {
         "(phi = {value:.2f}, p < 0.001)."
     ),
 }
+
+
+def _key_value_text(value: int | float | str) -> str:
+    """A key value as printed in a message: strings JSON-quoted, so they can't
+    be mistaken for a row number; integers at full precision."""
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, int):
+        return str(value)
+    return _number(value)
+
+
+def _key_message(key: dict) -> str:
+    """Name the repeated values and label the row numbers as positions:
+    in manual testing a model read "rows 13, 65" as the repeated IDs."""
+    shown_rows = key["sample_indices"][:5]
+    rows = ", ".join(str(i) for i in shown_rows)
+    if len(shown_rows) < key["conflicting_rows"]:
+        rows += " ..."
+    shown = key.get("sample_values", [])[:5]
+    values = ", ".join(_key_value_text(v) for v in shown)
+    if len(shown) < key["conflicting_values"]:
+        values += " ..."
+    n, n_rows = key["conflicting_values"], key["conflicting_rows"]
+    if n == 1:
+        found = f"its value {values}" if shown else "one of its values"
+        where = f"appears on {n_rows:,} rows with different data ("
+    else:
+        found = f"{n:,} of its values" + (f" ({values})" if shown else "")
+        where = (
+            f"each appear on more than one row with different data ({n_rows:,} rows; "
+        )
+    return (
+        f"'{key['column']}' looks like a row identifier, but {found} {where}"
+        f"0-based row positions {rows}): compare those rows and decide which "
+        "record is correct before deduplicating."
+    )
 
 
 def _association_message(col: str, association: dict) -> str:

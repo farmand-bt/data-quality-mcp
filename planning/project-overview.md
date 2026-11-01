@@ -183,7 +183,7 @@ This project is built across 5 milestones, plus a short Milestone 3.5 — delibe
 ## Key Design Decisions
 
 ### Tool Output Schema
-`profile_dataset` returns JSON matching this shape. Since Milestone 2 every section is computed. A column's `outliers` is `null` only when detection doesn't apply (non-numeric columns, or fewer than 4 numeric values); an agent reads `0` as "checked, none found", so `null` is never used for that. Row indices are 0-based data-row positions (CSV line = index + 2), and every index list is capped at 50, with `indices_truncated`. Milestone 3.5 added `missing_related_to` (null: not tested), `possible_sentinels` (suspected placeholder codes, [] when none) and `key_columns` (identifier columns with repeated values, [] when there is no key column); see [milestone-3.5.md](milestone-3.5.md). The focused tools (`detect_outliers`, `find_duplicates`, `analyze_correlations`) return `{"dataset": {name, source, rows, columns}, "<section>": ...}` using the same section shapes. The authoritative definition is `src/data_quality_mcp/profiler_core/schema.py`, also served as the resource `dataquality://schema/report`.
+`profile_dataset` returns JSON matching this shape. Since Milestone 2 every section is computed. A column's `outliers` is `null` only when detection doesn't apply (non-numeric columns, or fewer than 4 numeric values); an agent reads `0` as "checked, none found", so `null` is never used for that. Row indices are 0-based data-row positions (CSV line = index + 2), and every index list is capped at 50, with `indices_truncated`. Milestone 3.5 added `missing_related_to` (null: not tested), `possible_sentinels` (suspected placeholder codes, [] when none) and `key_columns` (identifier columns with repeated values, [] when there is no key column). Its 0.4.1 amendment added `sample_values` to `key_columns`: the repeated IDs themselves. See [milestone-3.5.md](milestone-3.5.md). The focused tools (`detect_outliers`, `find_duplicates`, `analyze_correlations`) return `{"dataset": {name, source, rows, columns}, "<section>": ...}` using the same section shapes. The authoritative definition is `src/data_quality_mcp/profiler_core/schema.py`, also served as the resource `dataquality://schema/report`.
 
 ```python
 {
@@ -222,7 +222,8 @@ This project is built across 5 milestones, plus a short Milestone 3.5 — delibe
         "near_duplicate_count": 2, "near_duplicate_pct": 0.38, "near_sample_indices": [7, 90],
         "indices_truncated": False,
         "key_columns": [{"column": "id", "conflicting_values": 1, "conflicting_rows": 2,
-                         "sample_indices": [13, 65], "indices_truncated": False}]
+                         "sample_values": [484], "sample_indices": [13, 65],
+                         "indices_truncated": False}]
     },
     "correlations": {
         "pearson": {"a": {"a": 1.0, "b": 0.97}},

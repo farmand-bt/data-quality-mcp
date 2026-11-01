@@ -4,15 +4,19 @@ Ported from the Data Quality Analyzer (`profiler/duplicates.py`) with the same
 definitions. Deviations (see planning/milestone-2.md): index samples are
 sorted for deterministic output and both lists share one cap, reported via
 `indices_truncated`. Added in Milestone 3.5 (D3): `key_columns`, identifier
-columns whose values repeat on rows with different data.
+columns whose values repeat on rows with different data, and (in its 0.4.1
+amendment) the repeated values themselves.
 """
 
+import math
 import re
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from data_quality_mcp import config
+from data_quality_mcp.profiler_core.json_safe import to_json_safe
 from data_quality_mcp.profiler_core.schema import DuplicateInfo, KeyColumnInfo
 
 # A key column's name: exactly id/key/uuid/guid in any case, or ending in one
@@ -25,6 +29,10 @@ _KEY_NAME = re.compile(
     rf"(?i:^{_KEY_WORD}$|[_\-\s]{_KEY_WORD}$)"
     r"|(?<=[a-z0-9])(?:Id|ID|Key|KEY|Uuid|UUID|Guid|GUID)$"
 )
+
+# Floats from here up may already have lost digits, so they aren't shown as
+# integers
+_EXACT_FLOAT_LIMIT = 2**53
 
 # Odd multipliers make each column's hash contribution distinct, so rows whose
 # values are merely permuted across columns rarely produce the same key.
@@ -78,11 +86,39 @@ def is_key_name(name: str) -> bool:
     return _KEY_NAME.search(name.strip()) is not None
 
 
+def key_value(value: Any) -> int | float | str:
+    """A key value in a JSON form a model can quote exactly
+    (planning/milestone-3.5.md, Amendment).
+
+    Checked in order: a bool (Python or numpy, before int, which it subclasses)
+    becomes "true"/"false"; an integer stays an integer; +/-inf becomes
+    "inf"/"-inf" (strict JSON has none); a whole float below 2**53 becomes an
+    integer (an ID column with gaps is read as float); other floats and strings
+    stay as they are; anything else becomes a string (ISO 8601 for a timestamp).
+    """
+    if isinstance(value, (bool, np.bool_)):
+        return "true" if value else "false"
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        value = float(value)
+        if math.isinf(value):
+            return "inf" if value > 0 else "-inf"
+        if value.is_integer() and abs(value) < _EXACT_FLOAT_LIMIT:
+            return int(value)
+        return value
+    if isinstance(value, str):
+        return value
+    safe = to_json_safe(value)
+    return safe if isinstance(safe, str) else str(value)
+
+
 def key_columns(
     df: pd.DataFrame,
     *,
     min_unique_ratio: float = config.KEY_MIN_UNIQUE_RATIO,
     max_indices: int = config.MAX_REPORTED_INDICES,
+    max_sample_values: int = config.MAX_KEY_SAMPLE_VALUES,
     kept: pd.Series | None = None,
 ) -> list[KeyColumnInfo]:
     """Identifier-like columns, and their values found on rows with different
@@ -94,6 +130,11 @@ def key_columns(
     Conflicts are counted on those rows with null keys ignored, so exact
     duplicates, already in exact_count, aren't counted again. A key column
     with no conflicts is listed with zeros.
+
+    sample_values lists the conflicting values in the order of their first
+    row, at most `max_sample_values`, in key_value's form. Values pandas counts
+    as equal (1, 1.0 and True in a mixed column) are shown in their first
+    row's form.
     """
     names = [(i, name) for i, name in enumerate(df.columns) if is_key_name(str(name))]
     if df.empty or not names:
@@ -106,12 +147,17 @@ def key_columns(
         if len(values) == 0 or values.nunique() / len(values) < min_unique_ratio:
             continue
         repeated = values.duplicated(keep=False)
-        rows = sorted(int(i) for i in values.index[repeated.to_numpy()])
+        conflicts = values[repeated.to_numpy()].sort_index(kind="stable")
+        rows = [int(i) for i in conflicts.index]
+        firsts = conflicts.drop_duplicates(keep="first")
         result.append(
             {
                 "column": str(name),
-                "conflicting_values": int(values[repeated].nunique()),
+                "conflicting_values": len(firsts),
                 "conflicting_rows": len(rows),
+                "sample_values": [
+                    key_value(v) for v in firsts.iloc[:max_sample_values].tolist()
+                ],
                 "sample_indices": rows[:max_indices],
                 "indices_truncated": len(rows) > max_indices,
             }
@@ -125,6 +171,7 @@ def analyze_duplicates(
     max_indices: int = config.MAX_REPORTED_INDICES,
     max_near_duplicate_columns: int = config.MAX_NEAR_DUPLICATE_COLUMNS,
     key_min_unique_ratio: float = config.KEY_MIN_UNIQUE_RATIO,
+    max_key_sample_values: int = config.MAX_KEY_SAMPLE_VALUES,
     kept: pd.Series | None = None,
 ) -> DuplicateInfo:
     """Exact duplicates and near-duplicates (identical on all columns but one).
@@ -174,6 +221,7 @@ def analyze_duplicates(
             df,
             min_unique_ratio=key_min_unique_ratio,
             max_indices=max_indices,
+            max_sample_values=max_key_sample_values,
             kept=kept,
         ),
     }
