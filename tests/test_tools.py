@@ -134,6 +134,13 @@ async def test_new_report_fields_reach_the_agent(client, messy_path: Path):
     assert len(report["columns"]["price"]["outliers"]["possible_sentinels"]) == 3
     assert report["duplicates"]["key_columns"][0]["sample_indices"] == [13, 65]
     assert report["duplicates"]["key_columns"][0]["sample_values"] == [484]
+    duplicates = (
+        await client.call_tool("find_duplicates", {"file_path": str(messy_path)})
+    ).structured_content
+    for content in (report, duplicates):
+        # 484 == 484.0 in Python: check that validation kept it an integer
+        (value,) = content["duplicates"]["key_columns"][0]["sample_values"]
+        assert type(value) is int
     outliers = (
         await client.call_tool("detect_outliers", {"file_path": str(messy_path)})
     ).structured_content

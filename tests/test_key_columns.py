@@ -278,6 +278,16 @@ def test_a_large_integer_id_keeps_every_digit_in_the_message():
     assert "its value 9007199254740993 appears on 2 rows" in _message(key)
 
 
+def test_floats_print_as_in_the_field():
+    # A whole float at or above 2**53 stays a float in sample_values, and the
+    # message must not print it as an exact integer either
+    keys = [1e20, 1e20, 9007199254740993.0, 9007199254740993.0, 2.5, 2.5]
+    keys += [float(i) for i in range(100)]
+    (key,) = key_columns(pd.DataFrame({"id": keys, "x": range(len(keys))}))
+    assert key["sample_values"] == [1e20, 9007199254740992.0, 2.5]
+    assert "(1e+20, 9007199254740992.0, 2.5)" in _message(key)
+
+
 def test_strings_are_escaped_in_the_message():
     (key,) = key_columns(_with_repeats(['say "hi"', 'say "hi"']))
     assert 'its value "say \\"hi\\"" appears' in _message(key)

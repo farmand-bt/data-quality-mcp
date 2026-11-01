@@ -332,7 +332,10 @@ class KeyColumnInfo(TypedDict):      # + one field
   - The message is built in `recommendations._key_message`. A report without `sample_values`, as in the recommendation tests, gets "one of its values appears ...".
 - **Values pandas counts as equal:** `1`, `1.0` and `True` in a mixed column are one conflicting value, shown in the first row's form. A test pins this.
 - **Output validation through the tools** (task 4): an `inf` ID and a `"007"` ID pass for both `find_duplicates` and `profile_dataset`, as `"inf"` and `"007"`, and the result serialises with `allow_nan=False`. Both output schemas publish `sample_values` items as integer, number or string.
-- **Tests:** 566 pass (32 new) on Python 3.12 / pandas 3 and on Python 3.10 / pandas 2.3.3, with 98% coverage. Text IDs stay strings on both pandas versions (`object` and `str` dtypes).
+- **Tests:** 567 pass (33 new) on Python 3.12 / pandas 3 and on Python 3.10 / pandas 2.3.3, with 98% coverage. Text IDs stay strings on both pandas versions (`object` and `str` dtypes).
+- **Small differences from the amendment's wording:**
+  - **Floats print with `repr`, not `_number`.** `_number` prints a whole float with `:.0f`, which is fine for sentinels. But the floats that reach `sample_values` are either non-integral (the same output either way) or whole numbers at or above 2**53, kept as floats on purpose. `_number` would have printed `1e20` as a 21-digit integer and `1e300` as 301 digits, against the rule that the message and the field agree. With `repr`, the message says `1e+20`, as the field does. (Found in the pre-PR review.)
+  - **Strings print with `json.dumps(value, ensure_ascii=False)`,** so a non-ASCII ID prints as stored (`"café"`, not `"café"`). Quotes, backslashes and newlines are still escaped.
 - **Version:** 0.4.1.
 
 **PR title / squash commit message:** `fix: name the repeated values in key_columns`

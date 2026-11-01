@@ -207,13 +207,16 @@ _ASSOCIATION_TEMPLATES = {
 
 
 def _key_value_text(value: int | float | str) -> str:
-    """A key value as printed in a message: strings JSON-quoted, so they can't
-    be mistaken for a row number; integers at full precision."""
+    """A key value as printed in a message, matching its sample_values form:
+    strings JSON-quoted (so they can't be mistaken for a row number, and
+    non-ASCII kept as stored), integers at full precision, and floats with
+    repr, so a whole float at or above 2**53 (kept a float on purpose) isn't
+    printed as an exact integer."""
     if isinstance(value, str):
         return json.dumps(value, ensure_ascii=False)
     if isinstance(value, int):
         return str(value)
-    return _number(value)
+    return repr(value)
 
 
 def _key_message(key: dict) -> str:
