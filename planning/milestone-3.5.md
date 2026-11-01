@@ -247,7 +247,7 @@ New settings in `config.py`, each passed to the core as a keyword parameter:
 - **Order:** in the order their first rows appear in `sample_indices`. The two lists don't pair up item by item: `sample_indices` holds every conflicting row, several per value. Sorting by value would fail on a column that mixes numbers and text.
 - **Cap:** `MAX_KEY_SAMPLE_VALUES` (10). No separate truncation flag: `len(sample_values) < conflicting_values` already shows it.
 - **JSON form,** so a model can quote the value exactly as stored. The helper checks in this order:
-  1. a bool becomes `"true"` or `"false"`. It is checked first, because `bool` is a subclass of `int` and output validation would turn `True` into `1`.
+  1. a bool, Python or numpy (`np.bool_`, which is neither a `bool` nor an `np.integer`), becomes `"true"` or `"false"`. It is checked first, because `bool` is a subclass of `int` and output validation would turn `True` into `1`.
   2. an integer (Python or numpy) stays an integer, at full precision
   3. ±infinity becomes `"inf"` or `"-inf"`. Strict JSON has no infinity, and `to_json_safe` would make it `null`, which the field's type rejects. Detection and counts are unchanged, so two `inf` IDs still count as one conflicting value.
   4. a float with no fractional part and an absolute value below 2**53 becomes an integer (an ID column with gaps is read as float, so 484 would otherwise show as 484.0). Larger floats stay floats. Above 2**53 a float may already have lost digits, so printing it as an integer would claim a precision it doesn't have (and `1e300` would become a 301-digit number).
@@ -261,11 +261,11 @@ New settings in `config.py`, each passed to the core as a keyword parameter:
 **Recommendation wording** (supersedes D3's and As built's):
 - One value: "'id' looks like a row identifier, but its value 484 appears on 2 rows with different data (0-based row positions 13, 65): compare those rows and decide which record is correct before deduplicating."
 - Several values: "'id' looks like a row identifier, but 3 of its values (1021, 77, 12) each appear on more than one row with different data (7 rows; 0-based row positions 3, 13, 65, 90, 120 ...): compare those rows and decide which record is correct before deduplicating."
-- **Caps:** at most 5 values, followed by " ..." when `conflicting_values` > 5, and at most 5 row positions, followed by " ..." when `conflicting_rows` > 5.
+- **Caps:** at most 5 values, taken from `sample_values`, and at most 5 row positions, taken from `sample_indices`. Each list is followed by " ..." when it shows fewer items than exist: fewer values than `conflicting_values`, or fewer positions than `conflicting_rows`. This also holds when `sample_values` is capped below 5.
 - **Printing:** each value prints from its `sample_values` form, so the message and the field always agree.
   - Integers print with `str`, at full precision. (`_number` goes through a float, so `9007199254740993` would print as `...992`.)
   - Floats print with `_number`, as for sentinels.
-  - Strings, including `"inf"`, `"true"` and timestamps, print in double quotes, as in JSON (`"A-17"`), so a value can't be mistaken for a row number.
+  - Strings, including `"inf"`, `"true"` and timestamps, print with `json.dumps(value)`: in double quotes, with quotes, backslashes and newlines escaped (`"A-17"`). So a value can't be mistaken for a row number.
 
 ### Schema changes
 
@@ -288,7 +288,7 @@ class KeyColumnInfo(TypedDict):      # + one field
 
 ### Configuration
 
-- `MAX_KEY_SAMPLE_VALUES = 10`, passed to `key_columns` and `analyze_duplicates` as a keyword parameter.
+- `MAX_KEY_SAMPLE_VALUES = 10`, passed to `key_columns` and `analyze_duplicates` as the keyword parameter `max_sample_values`.
 
 ### Tasks
 
@@ -308,7 +308,10 @@ class KeyColumnInfo(TypedDict):      # + one field
    - two `inf` IDs give `"inf"`, the message quotes it, and both tools' output passes validation and strict JSON (`allow_nan=False`)
    - an integer ID above 2**53 (`9007199254740993`) keeps every digit, in the field and in the message
    - a float ID of `1e20` or more with no fractional part stays a float
-   - bools give `"true"`/`"false"`, and a timestamp ID gives its ISO 8601 string
+   - Python and numpy bools give `"true"`/`"false"`, and a timestamp ID gives its ISO 8601 string
+   - a numeric-looking string ID (`"007"`) stays that string through both tools' output validation
+   - a string ID containing a double quote is escaped in the message
+   - with `max_sample_values=2` and 3 conflicting values, the message lists 2 values and " ..."
    - order follows the first conflicting row, not the value
    - 12 conflicting values give 10, with `conflicting_values == 12`
    - a key column with no conflicts gives `[]`
