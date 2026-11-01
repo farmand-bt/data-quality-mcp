@@ -1,7 +1,7 @@
 # Milestone 3.5: Profiling Follow-ups
 
-> **Status: complete.** The spec was approved in #13 and implemented on `feat/milestone-3.5`. See **As built** at the end for figures and small differences.
-> Shared context (architecture, report schema, design decisions) is in [project-overview.md](project-overview.md). Where this spec changes the report schema (see **Schema changes**), **this spec wins** until the implementation PR updates the overview. The previous milestone is [milestone-3.md](milestone-3.md). Its D9 deferred these items to "a separate short spec after M3". The milestone sits between M3 and M4, so M4 (remote deployment) and M5 keep their numbers.
+> **Status: complete; the Amendment (0.4.1) is not implemented yet.** The spec was approved in #13 and implemented on `feat/milestone-3.5`. See **As built** for figures and small differences. The **Amendment** at the end adds the conflicting key values to `key_columns`.
+> Shared context (architecture, report schema, design decisions) is in [project-overview.md](project-overview.md). Where this spec changes the report schema (see **Schema changes**, and the Amendment's own **Schema changes**), **this spec wins** until the implementation PR updates the overview. The previous milestone is [milestone-3.md](milestone-3.md). Its D9 deferred these items to "a separate short spec after M3". The milestone sits between M3 and M4, so M4 (remote deployment) and M5 keep their numbers.
 
 **Goal:** Make the report say more about *why* data is dirty, not only *how much*. It adds four things:
 - which observed columns the missing values depend on
@@ -235,3 +235,91 @@ New settings in `config.py`, each passed to the core as a keyword parameter:
   - D1, as a relabelling with `"unknown"`
   - D4, D5 and D6
   - #14's two mixed-offset fixes
+
+---
+
+## Amendment: conflicting key values (0.4.1)
+
+**Why.** In manual testing, Claude Desktop read the repeated-ID warning as "id 13 and 65". Those are row positions; the repeated ID is 484. `KeyColumnInfo` reports which rows conflict but not which values, so a model has nothing to quote except the row numbers. The wording fix in As built made the sentence clearer, but the value itself is still missing from the report.
+
+**Decision.** `key_columns` entries gain `sample_values`: the conflicting key values themselves, capped. The recommendation names the value and labels the row numbers as positions.
+- **Content:** each value counted in `conflicting_values`, once, on the same deduplicated rows with null keys ignored (D3's counting is unchanged).
+- **Order:** in the order their first rows appear in `sample_indices`. The two lists don't pair up item by item: `sample_indices` holds every conflicting row, several per value. Sorting by value would fail on a column that mixes numbers and text.
+- **Cap:** `MAX_KEY_SAMPLE_VALUES` (10). No separate truncation flag: `len(sample_values) < conflicting_values` already shows it.
+- **JSON form,** so a model can quote the value exactly as stored. The helper checks in this order:
+  1. a bool, Python or numpy (`np.bool_`, which is neither a `bool` nor an `np.integer`), becomes `"true"` or `"false"`. It is checked first, because `bool` is a subclass of `int` and output validation would turn `True` into `1`.
+  2. an integer (Python or numpy) stays an integer, at full precision
+  3. ±infinity becomes `"inf"` or `"-inf"`. Strict JSON has no infinity, and `to_json_safe` would make it `null`, which the field's type rejects. Detection and counts are unchanged, so two `inf` IDs still count as one conflicting value.
+  4. a float with no fractional part and an absolute value below 2**53 becomes an integer (an ID column with gaps is read as float, so 484 would otherwise show as 484.0). Larger floats stay floats. Above 2**53 a float may already have lost digits, so printing it as an integer would claim a precision it doesn't have (and `1e300` would become a 301-digit number).
+  5. any other float stays a float
+  6. a string stays a string
+  7. anything else (a timestamp, for example) becomes a string: `to_json_safe`'s form when that is a string (ISO 8601 for a timestamp), otherwise `str(value)`
+
+  This is lossy in one accepted way: a stored string `"inf"`, `"true"` or `"2024-01-01T00:00:00"` looks the same as a converted infinity, bool or timestamp, in the field and in the message. The row positions say where to look, and the type is visible there.
+- **Not changed:** detection, the uniqueness gate, `conflicting_values`, `conflicting_rows`, `sample_indices` and scoring (D8).
+
+**Recommendation wording** (supersedes D3's and As built's):
+- One value: "'id' looks like a row identifier, but its value 484 appears on 2 rows with different data (0-based row positions 13, 65): compare those rows and decide which record is correct before deduplicating."
+- Several values: "'id' looks like a row identifier, but 3 of its values (1021, 77, 12) each appear on more than one row with different data (7 rows; 0-based row positions 3, 13, 65, 90, 120 ...): compare those rows and decide which record is correct before deduplicating."
+- **Caps:** at most 5 values, taken from `sample_values`, and at most 5 row positions, taken from `sample_indices`. Each list is followed by " ..." when it shows fewer items than exist: fewer values than `conflicting_values`, or fewer positions than `conflicting_rows`. This also holds when `sample_values` is capped below 5.
+- **Printing:** each value prints from its `sample_values` form, so the message and the field always agree.
+  - Integers print with `str`, at full precision. (`_number` goes through a float, so `9007199254740993` would print as `...992`.)
+  - Floats print with `_number`, as for sentinels.
+  - Strings, including `"inf"`, `"true"` and timestamps, print with `json.dumps(value)`: in double quotes, with quotes, backslashes and newlines escaped (`"A-17"`). So a value can't be mistaken for a row number.
+
+### Schema changes
+
+**This changes the report contract** (`profiler_core/schema.py`). It is one addition:
+
+```python
+class KeyColumnInfo(TypedDict):      # + one field
+    column: str
+    conflicting_values: int
+    conflicting_rows: int
+    sample_values: list[int | float | str]  # the conflicting values, by first row, capped at 10;
+                                     # never null, never ±inf (see JSON form)
+    sample_indices: list[int]        # capped at 50
+    indices_truncated: bool          # refers to sample_indices only
+```
+
+`find_duplicates` and `profile_dataset` return it through `DuplicateInfo.key_columns`, so both output schemas gain the field. A key column with no conflicts has `sample_values: []`.
+
+**Measured on the fixture:** `[{"column": "id", "conflicting_values": 1, "conflicting_rows": 2, "sample_values": [484], "sample_indices": [13, 65], "indices_truncated": False}]`.
+
+### Configuration
+
+- `MAX_KEY_SAMPLE_VALUES = 10`, passed to `key_columns` and `analyze_duplicates` as the keyword parameter `max_sample_values`.
+
+### Tasks
+
+1. **`config.py`** and **`profiler_core/schema.py`:** the setting and the field.
+2. **`profiler_core/duplicates.py`:** collect the values in `key_columns`, with a small helper for the JSON form.
+3. **`profiler_core/recommendations.py`:** the wording above.
+4. **Task 0 again:** check that `list[int | float | str]` publishes as an array of integer, number or string items with mcp 2.3.0, and that output validation keeps `484` an integer (lax mode must not turn it into `484.0` or `"484"`). This was checked while writing the amendment, with pydantic 2.14.1: `484` stays an integer, and `True` becomes `1`, hence the bool rule. The implementation repeats the check through the tools.
+5. **Tools and docs:**
+   - the `find_duplicates` and `profile_dataset` docstrings
+   - the overview's description of `key_columns` and its schema example
+   - `docs/architecture.md`
+   - an As built for this amendment, and the status line at the top marked as implemented
+   - `prompts.py` mentions conflicting values only in general, so it needs no change
+6. **Tests:**
+   - the fixture gives `sample_values == [484]`, and the recommendation names 484 and "0-based row positions 13, 65"
+   - a float ID column with gaps gives integers; string IDs give strings; a non-integral float stays a float
+   - two `inf` IDs give `"inf"`, the message quotes it, and both tools' output passes validation and strict JSON (`allow_nan=False`)
+   - an integer ID above 2**53 (`9007199254740993`) keeps every digit, in the field and in the message
+   - a float ID of `1e20` or more with no fractional part stays a float
+   - Python and numpy bools give `"true"`/`"false"`, and a timestamp ID gives its ISO 8601 string
+   - a numeric-looking string ID (`"007"`) stays that string through both tools' output validation
+   - a string ID containing a double quote is escaped in the message
+   - with `max_sample_values=2` and 3 conflicting values, the message lists 2 values and " ..."
+   - order follows the first conflicting row, not the value
+   - 12 conflicting values give 10, with `conflicting_values == 12`
+   - a key column with no conflicts gives `[]`
+   - the several-values wording, including the 5-value cap and quoted strings
+   - the output schemas of both tools include `sample_values`
+   - existing tests updated to the new field and wording: the exact dict in `tests/test_key_columns.py`, its old-wording assertion, and the `key_columns` entry in `tests/test_tools.py`
+7. **Version 0.4.1,** in `pyproject.toml`, `src/data_quality_mcp/__init__.py` and the project's entry in `uv.lock`. D9 gave new report fields a minor version, but minor versions now follow milestones. So an addition between milestones takes a patch version, and M4 is still 0.5.0.
+
+**Analyzer:** nothing to port. D3 is MCP-only (D9).
+
+**PR title / squash commit message:** `fix: name the repeated values in key_columns`
