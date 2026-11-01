@@ -440,3 +440,56 @@ def test_column_of_only_infinite_values():
     assert (column["stats"]["count"], column["stats"]["infinite_count"]) == (0, 5)
     assert column["stats"]["mean"] is None
     assert any("5 infinite value(s)" in w for w in column["warnings"])
+
+
+# --- ISO dates in a CSV (planning/milestone-3.5.md, D4) ---
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        ["2020-01-01", "2020-02-03", None, "2021-12-31"],
+        ["2020-01-01T10:00:00", "2020-01-02 10:30", "2020-01-03T09:00:00.25"],
+        ["2020-01-01T10:00:00Z", "2020-01-02T10:00:00+02:00", "2020-01-03 08:00Z"],
+    ],
+)
+def test_iso_dates_in_a_csv_are_typed(values):
+    df = pd.DataFrame({"when": values})
+    column = generate_report(df, "t.csv", "file_path", input_format=".csv")["columns"][
+        "when"
+    ]
+    assert (column["inferred_type"], column["type_mismatch"]) == ("datetime", False)
+    assert column["stats"]["min_date"] is not None  # still parsed for the stats
+    assert not any("Type mismatch" in w for w in column["warnings"])
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        ["01/02/2020", "03/04/2020", "05/06/2020"],  # one format, but not ISO
+        ["2020-01-01", "01/02/2020", "15-Jan-2020"],  # mixed formats
+        ["2020-01-01T10:00:00Z", "2020-01-02 10:00"],  # naive and offset mixed
+    ],
+)
+def test_other_date_text_stays_a_mismatch(values):
+    df = pd.DataFrame({"when": values})
+    column = generate_report(df, "t.csv", "file_path", input_format=".csv")["columns"][
+        "when"
+    ]
+    assert (column["inferred_type"], column["type_mismatch"]) == ("datetime", True)
+
+
+@pytest.mark.parametrize("input_format", [".xlsx", None])
+def test_iso_text_outside_a_csv_stays_a_mismatch(input_format):
+    # XLSX has a date type, and without a known format the M1 rule applies
+    df = pd.DataFrame({"when": ["2020-01-01", "2020-02-03"]})
+    column = generate_report(df, "t.xlsx", "file_path", input_format=input_format)[
+        "columns"
+    ]["when"]
+    assert column["type_mismatch"] is True
+
+
+def test_raw_fixture_score_is_unchanged_by_the_iso_rule(messy_df: pd.DataFrame):
+    report = generate_report(messy_df, "m.csv", "file_path", input_format=".csv")
+    assert report["columns"]["sale_date"]["type_mismatch"] is True  # 3 formats
+    assert report["dataset"]["quality_score"] == 77

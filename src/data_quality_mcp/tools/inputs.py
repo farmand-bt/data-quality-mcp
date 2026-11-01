@@ -18,6 +18,9 @@ from data_quality_mcp.cleaner_core.schema import (
 # would otherwise drop them silently; the core rejects them too, for direct calls.
 for _step in (HandleMissingStep, RemoveDuplicatesStep, FixTypeStep, HandleOutliersStep):
     _step.__pydantic_config__ = {"extra": "forbid"}
+# Strict for the outlier step: lax mode would turn `values: [true]` into 1.0 and
+# "5" into 5.0 before the core could reject them (JSON integers still pass)
+HandleOutliersStep.__pydantic_config__ = {"extra": "forbid", "strict": True}
 
 FilePath = Annotated[
     str | None,

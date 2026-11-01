@@ -160,13 +160,14 @@ data-quality-mcp/
 
 ## Milestone Roadmap (Summary)
 
-This project is built across 5 milestones — deliberately fewer and lighter than your previous two projects, since there's no UI layer here. Each milestone has its own spec in this folder (`planning/milestone-N.md`), written and reviewed as a `docs:` PR before implementation starts.
+This project is built across 5 milestones, plus a short Milestone 3.5 — deliberately fewer and lighter than your previous two projects, since there's no UI layer here. Each milestone has its own spec in this folder (`planning/milestone-N.md`), written and reviewed as a `docs:` PR before implementation starts.
 
 | Milestone | Focus                                | What it adds                                                                 |
 |-----------|---------------------------------------|-------------------------------------------------------------------------------|
 | **1** ✅  | **Scaffolding + Core Profiling** ([spec](milestone-1.md)) | Repo setup, `profiler_core` (types/stats/missing), first tool (`profile_dataset`) over stdio |
 | **2** ✅  | **Expanded Tool Surface** ([spec](milestone-2.md)) | Outliers, duplicates, correlations, recommendations tools; a resource; a prompt |
 | **3** ✅  | **Flexible Input + Cleaning Tools** ([spec](milestone-3.md)) | Inline data support (not just file paths), cleaning tools ported from the cleaner engine |
+| **3.5** ✅ | **Profiling Follow-ups** ([spec](milestone-3.5.md)) | What missing values go with, possible placeholder codes, repeated IDs, ISO dates in CSVs, a minimum for correlations, finite-only fills |
 | **4**     | **Remote Deployment**                 | Streamable HTTP transport, Docker, minimal auth, a live deployment            |
 | **5**     | **Polish & Docs**                     | README with connection guides, full test pass, optional MCP registry listing  |
 
@@ -182,7 +183,7 @@ This project is built across 5 milestones — deliberately fewer and lighter tha
 ## Key Design Decisions
 
 ### Tool Output Schema
-`profile_dataset` returns JSON matching this shape. Since Milestone 2 every section is computed. A column's `outliers` is `null` only when detection doesn't apply (non-numeric columns, or fewer than 4 numeric values); an agent reads `0` as "checked, none found", so `null` is never used for that. Row indices are 0-based data-row positions (CSV line = index + 2), and every index list is capped at 50, with `indices_truncated`. The focused tools (`detect_outliers`, `find_duplicates`, `analyze_correlations`) return `{"dataset": {name, source, rows, columns}, "<section>": ...}` using the same section shapes. The authoritative definition is `src/data_quality_mcp/profiler_core/schema.py`, also served as the resource `dataquality://schema/report`.
+`profile_dataset` returns JSON matching this shape. Since Milestone 2 every section is computed. A column's `outliers` is `null` only when detection doesn't apply (non-numeric columns, or fewer than 4 numeric values); an agent reads `0` as "checked, none found", so `null` is never used for that. Row indices are 0-based data-row positions (CSV line = index + 2), and every index list is capped at 50, with `indices_truncated`. Milestone 3.5 added `missing_related_to` (null: not tested), `possible_sentinels` (suspected placeholder codes, [] when none) and `key_columns` (identifier columns with repeated values, [] when there is no key column); see [milestone-3.5.md](milestone-3.5.md). The focused tools (`detect_outliers`, `find_duplicates`, `analyze_correlations`) return `{"dataset": {name, source, rows, columns}, "<section>": ...}` using the same section shapes. The authoritative definition is `src/data_quality_mcp/profiler_core/schema.py`, also served as the resource `dataquality://schema/report`.
 
 ```python
 {
@@ -201,13 +202,17 @@ This project is built across 5 milestones — deliberately fewer and lighter tha
             "type_mismatch": False,
             "missing_count": 12,
             "missing_pct": 1.2,
+            "missing_related_to": [    # null: not tested; []: tested, none found
+                {"column": "age_years", "method": "point_biserial", "value": 0.663}
+            ],
             "stats": { },              # contents vary by inferred_type
             "outliers": {              # null for non-numeric columns or < 4 values
                 "iqr_count": 15, "iqr_pct": 2.88,
                 "iqr_lower_bound": 147204.5, "iqr_upper_bound": 546016.5,
                 "iqr_indices": [3, 41],
                 "zscore_count": 2, "zscore_pct": 0.38, "zscore_indices": [41, 77],
-                "indices_truncated": False
+                "indices_truncated": False,
+                "possible_sentinels": [{"value": -1000.0, "count": 4}]  # suspects, not verdicts
             },
             "warnings": []
         }
@@ -215,11 +220,13 @@ This project is built across 5 milestones — deliberately fewer and lighter tha
     "duplicates": {
         "exact_count": 19, "exact_pct": 3.65, "sample_indices": [5, 18],
         "near_duplicate_count": 2, "near_duplicate_pct": 0.38, "near_sample_indices": [7, 90],
-        "indices_truncated": False
+        "indices_truncated": False,
+        "key_columns": [{"column": "id", "conflicting_values": 1, "conflicting_rows": 2,
+                         "sample_indices": [13, 65], "indices_truncated": False}]
     },
     "correlations": {
         "pearson": {"a": {"a": 1.0, "b": 0.97}},
-        "cramers_v": {"c": {"d": 0.12}},
+        "cramers_v": {"c": {"d": 0.12}},   # null (like pearson) below 10 shared rows
         "high_correlation_pairs": [{"col_a": "a", "col_b": "b", "method": "pearson", "value": 0.97}]
     },
     "recommendations": [       # sorted critical -> warning -> info
@@ -230,7 +237,7 @@ This project is built across 5 milestones — deliberately fewer and lighter tha
 }
 ```
 
-`clean_dataset` returns a `CleaningResult` (defined in the same file). Its step input types are in `cleaner_core/schema.py`. The figures below are the real results of the six-step plan in [milestone-3.md](milestone-3.md#schema-changes-proposed) on the messy sample:
+`clean_dataset` returns a `CleaningResult` (defined in the same file). Its step input types are in `cleaner_core/schema.py`. The figures below are the real results of the six-step plan in [milestone-3.md](milestone-3.md#schema-changes-proposed) on the messy sample. Since Milestone 3.5 the CSV output scores 88, up from 86, because ISO dates in a CSV no longer count as a type mismatch ([milestone-3.5.md](milestone-3.5.md), D4):
 
 ```python
 {
@@ -240,7 +247,7 @@ This project is built across 5 milestones — deliberately fewer and lighter tha
     "before": {"rows": 520, "columns": 10, "missing_cells": 248, "exact_duplicates": 19,
                "quality_score": 77, "quality_grade": "C"},
     "after":  {"rows": 487, "columns": 10, "missing_cells": 202, "exact_duplicates": 0,
-               "quality_score": 86, "quality_grade": "B"},  # profiled from the written file
+               "quality_score": 88, "quality_grade": "B"},  # profiled from the written file
     "log": [{"action": "fix_type", "column": "sqft", "strategy": "to_numeric",
              "rows_before": 520, "rows_after": 520, "rows_removed": 0, "values_nulled": 11,
              "original_dtype": "str", "new_dtype": "float64",

@@ -99,7 +99,9 @@ result is clamped to 0-100 and rounded. Higher is better.
 
 Notes:
 - `type_mismatch` means values are stored as a different type than they
-  represent (numbers or dates stored as text, boolean-like strings).
+  represent (numbers or dates stored as text, boolean-like strings). In a
+  CSV, which has no date type, dates written as ISO 8601 text (2024-01-31,
+  optionally with a time) in one timezone convention are not a mismatch.
   Inconsistent category casing is reported as a warning and a `consistency`
   recommendation, and does not affect the score.
 - Outliers use the IQR method ({iqr:g} x IQR fences) for the score. The
@@ -107,4 +109,8 @@ Notes:
   values inflate the std and can hide other outliers, so treat it as secondary.
 - Near-duplicates (rows identical on all but one column) are reported but not
   scored, because they are often legitimate.
+- Also reported but not scored: missing-value associations (the gaps already
+  count as missing), possible sentinel values (already counted as outliers)
+  and repeated IDs in key columns (like near-duplicates, often a corrected
+  record).
 """

@@ -119,3 +119,13 @@ def test_sorted_critical_first():
         )
     )
     assert [r["severity"] for r in recs] == ["critical", "warning", "info"]
+
+
+def test_sentinel_values_are_printed_exactly():
+    # They are copied into clean_dataset's `values`, matched by float equality
+    from data_quality_mcp.profiler_core.recommendations import _number
+
+    assert _number(-1000.0) == "-1000"
+    assert _number(9999999.0) == "9999999"
+    assert _number(1234567.5) == "1234567.5"
+    assert float(_number(0.1 + 0.2)) == 0.1 + 0.2

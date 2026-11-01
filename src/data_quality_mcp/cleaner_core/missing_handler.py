@@ -1,7 +1,10 @@
-"""Missing-value strategies, ported unchanged from the Data Quality Analyzer
+"""Missing-value strategies, ported from the Data Quality Analyzer
 (`cleaner/missing_handler.py`), plus a `reset_index` switch the pipeline uses
-to keep original row labels until every step has run."""
+to keep original row labels until every step has run. Deviation (Milestone
+3.5, D6): fill_mean and fill_median use finite values only, as the report's
+stats do; the analyzer filled [1, inf, NaN] with inf."""
 
+import numpy as np
 import pandas as pd
 
 from data_quality_mcp.profiler_core.exceptions import InvalidInputError
@@ -44,14 +47,14 @@ def handle_missing(
         out = out.drop(columns=[column])
 
     elif strategy == "fill_mean":
-        numeric = pd.to_numeric(out[column], errors="coerce")
+        numeric = _finite(out[column])
         fill_val = numeric.mean()
         if (numeric.dropna() % 1 == 0).all():
             fill_val = round(fill_val)
         out[column] = out[column].fillna(fill_val)
 
     elif strategy == "fill_median":
-        numeric = pd.to_numeric(out[column], errors="coerce")
+        numeric = _finite(out[column])
         fill_val = numeric.median()
         if (numeric.dropna() % 1 == 0).all():
             fill_val = round(fill_val)
@@ -91,3 +94,9 @@ def handle_missing(
         "missing_before": missing_before,
         "missing_after": missing_after,
     }
+
+
+def _finite(series: pd.Series) -> pd.Series:
+    """The column as numbers, with +/-inf treated as missing."""
+    numeric = pd.to_numeric(series, errors="coerce")
+    return numeric.where(np.isfinite(numeric.to_numpy(dtype=float, na_value=np.nan)))
