@@ -109,3 +109,17 @@ def test_sample_indices_are_capped():
     assert result["conflicting_rows"] == 60
     assert len(result["sample_indices"]) == 50
     assert result["indices_truncated"] is True
+
+
+def test_the_recommendation_does_not_read_like_an_id_value(messy_df: pd.DataFrame):
+    # Manual testing: "1 value(s) appear" was read by a model as "id 1"
+    from data_quality_mcp.profiler_core.report import generate_report
+
+    (message,) = [
+        r["message"]
+        for r in generate_report(messy_df, "m.csv", "file_path")["recommendations"]
+        if r["column"] == "id"
+    ]
+    assert "one of its values is shared by rows with different data (rows 13, 65)" in (
+        message
+    )

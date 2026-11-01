@@ -53,6 +53,14 @@ def generate_recommendations(
         if key["conflicting_values"]:
             rows = ", ".join(str(i) for i in key["sample_indices"][:5])
             more = " ..." if key["conflicting_rows"] > 5 else ""
+            # Spell out the count: "1 value(s) appear" read like "value 1" to a
+            # model in manual testing
+            n = key["conflicting_values"]
+            shared = (
+                "one of its values is shared"
+                if n == 1
+                else f"{n:,} of its values are each shared"
+            )
             recs.append(
                 {
                     "severity": "warning",
@@ -60,8 +68,8 @@ def generate_recommendations(
                     "column": key["column"],
                     "message": (
                         f"'{key['column']}' looks like a row identifier, but "
-                        f"{key['conflicting_values']:,} value(s) appear on rows "
-                        f"with different data (rows {rows}{more}): decide which "
+                        f"{shared} by rows with different data (rows "
+                        f"{rows}{more}): compare those rows and decide which "
                         "record is correct before deduplicating."
                     ),
                 }

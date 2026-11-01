@@ -221,13 +221,14 @@ New settings in `config.py`, each passed to the core as a keyword parameter:
     - Sentinel values print exactly in recommendations, so they can be copied into `values`.
     - The docstring is corrected: all-9s codes are listed in any column.
     - A tool-level XLSX text-date test was added.
+  - **Manual testing in Claude Desktop:** the repeated-ID warning said "1 value(s) appear on rows with different data", and the model read that as "id 1". It now says "one of its values is shared by rows with different data (rows 13, 65)".
 - **Task 0 finding:** in lax mode, Pydantic turned `values: [true]` into `1.0` and `"5"` into `5.0` before the core could reject them. `tools/inputs.py` therefore validates `HandleOutliersStep` in strict mode, which still accepts JSON integers (`5000` → `5000.0`). The core rejects bools and non-finite values too, for direct callers.
 - **Small differences from the spec's wording:**
   - The report builders take `input_format` (".csv" or ".xlsx"). Without it, as for a direct call with a DataFrame, the M1 rule applies, so ISO text stays a mismatch.
   - A single-column dataset has no other column to tell rows apart, so rows sharing a value are exact duplicate rows. The repeat test then never fires, and only the all-9s test can list a value. This follows from D2's definition, and a test documents it.
   - The correlations section's Cramér's V keeps SciPy's default Yates correction on 2 × 2 tables (analyzer parity). D1's bias-corrected V uses none, as specified.
   - Recommendations read the new fields with `.get`, so a report built without them (as in the recommendation tests) still works.
-- **Tests:** 531 pass on Python 3.12 / pandas 3 and on Python 3.10 / pandas 2, with 98% coverage.
+- **Tests:** 532 pass on Python 3.12 / pandas 3 and on Python 3.10 / pandas 2, with 98% coverage.
 - **Version:** 0.4.0.
 - **Port-back list (task 13),** for a separate analyzer PR after this merges:
   - D1, as a relabelling with `"unknown"`
