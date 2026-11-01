@@ -1,6 +1,6 @@
 # Milestone 3.5: Profiling Follow-ups
 
-> **Status: complete.** The spec was approved in #13 and implemented on `feat/milestone-3.5`. See **As built** at the end for figures and small differences.
+> **Status: complete.** The spec was approved in #13 and implemented on `feat/milestone-3.5`. See **As built** for figures and small differences. An **Amendment** at the end adds the conflicting key values to `key_columns` (0.4.1).
 > Shared context (architecture, report schema, design decisions) is in [project-overview.md](project-overview.md). Where this spec changes the report schema (see **Schema changes**), **this spec wins** until the implementation PR updates the overview. The previous milestone is [milestone-3.md](milestone-3.md). Its D9 deferred these items to "a separate short spec after M3". The milestone sits between M3 and M4, so M4 (remote deployment) and M5 keep their numbers.
 
 **Goal:** Make the report say more about *why* data is dirty, not only *how much*. It adds four things:
@@ -235,3 +235,69 @@ New settings in `config.py`, each passed to the core as a keyword parameter:
   - D1, as a relabelling with `"unknown"`
   - D4, D5 and D6
   - #14's two mixed-offset fixes
+
+---
+
+## Amendment: conflicting key values (0.4.1)
+
+**Why.** In manual testing, Claude Desktop read the repeated-ID warning as "id 13 and 65". Those are row positions; the repeated ID is 484. `KeyColumnInfo` reports which rows conflict but not which values, so a model has nothing to quote except the row numbers. The wording fix in As built made the sentence clearer, but the value itself is still missing from the report.
+
+**Decision.** `key_columns` entries gain `sample_values`: the conflicting key values themselves, capped. The recommendation names the value and labels the row numbers as positions.
+- **Content:** each value counted in `conflicting_values`, once, on the same deduplicated rows with null keys ignored (D3's counting is unchanged).
+- **Order:** by the value's first conflicting row, so the values line up with `sample_indices`. Sorting by value would fail on a column that mixes numbers and text.
+- **Cap:** `MAX_KEY_SAMPLE_VALUES` (10). No separate truncation flag: `len(sample_values) < conflicting_values` already shows it.
+- **JSON form,** so a model can quote the value exactly as stored:
+  - integers stay integers
+  - a float with no fractional part becomes an integer (an ID column with gaps is read as float, so 484 would otherwise show as 484.0)
+  - other floats stay floats
+  - strings stay strings
+  - anything else (a bool, a timestamp) becomes a string in the report's usual JSON form, e.g. a UTC ISO 8601 timestamp
+- **Not changed:** detection, the uniqueness gate, `conflicting_values`, `conflicting_rows`, `sample_indices` and scoring (D8).
+
+**Recommendation wording** (supersedes D3's and As built's), with at most 5 values and 5 row positions, then " ...":
+- One value: "'id' looks like a row identifier, but its value 484 appears on 2 rows with different data (0-based row positions 13, 65): compare those rows and decide which record is correct before deduplicating."
+- Several values: "'id' looks like a row identifier, but 3 of its values (484, 77, 12) each appear on more than one row with different data (7 rows; 0-based row positions 3, 13, 65, 90, 120 ...): compare those rows and decide which record is correct before deduplicating."
+- Numbers print exactly, as for sentinels. Strings print in double quotes, as in JSON (`"A-17"`), so a value can't be mistaken for a row number.
+
+### Schema changes
+
+**This changes the report contract** (`profiler_core/schema.py`). It is one addition:
+
+```python
+class KeyColumnInfo(TypedDict):      # + one field
+    column: str
+    conflicting_values: int
+    conflicting_rows: int
+    sample_values: list[int | float | str]  # the conflicting values, by first row, capped at 10
+    sample_indices: list[int]        # capped at 50
+    indices_truncated: bool          # refers to sample_indices only
+```
+
+`find_duplicates` and `profile_dataset` return it through `DuplicateInfo.key_columns`, so both output schemas gain the field. A key column with no conflicts has `sample_values: []`.
+
+**Measured on the fixture:** `[{"column": "id", "conflicting_values": 1, "conflicting_rows": 2, "sample_values": [484], "sample_indices": [13, 65], "indices_truncated": False}]`.
+
+### Configuration
+
+- `MAX_KEY_SAMPLE_VALUES = 10`, passed to `key_columns` and `analyze_duplicates` as a keyword parameter.
+
+### Tasks
+
+1. **`config.py`** and **`profiler_core/schema.py`:** the setting and the field.
+2. **`profiler_core/duplicates.py`:** collect the values in `key_columns`, with a small helper for the JSON form.
+3. **`profiler_core/recommendations.py`:** the wording above.
+4. **Task 0 again:** check that `list[int | float | str]` publishes as an array of number-or-string items with mcp 2.3.0, and that output validation keeps `484` an integer (lax mode must not turn it into `484.0` or `"484"`).
+5. **Tools and docs:** the `find_duplicates` and `profile_dataset` docstrings, `prompts.py` if it describes the fields, the overview's schema example, `docs/architecture.md`, and the As built below.
+6. **Tests:**
+   - the fixture gives `sample_values == [484]`, and the recommendation names 484 and "0-based row positions 13, 65"
+   - a float ID column with gaps gives integers; string IDs give strings; a non-integral float stays a float
+   - order follows the first conflicting row, not the value
+   - 12 conflicting values give 10, with `conflicting_values == 12`
+   - a key column with no conflicts gives `[]`
+   - the several-values wording, including the 5-value cap and quoted strings
+   - the output schemas of both tools include `sample_values`
+7. **Version 0.4.1.** The field is an addition, and the minor version stays with the milestones, so M4 is still 0.5.0.
+
+**Analyzer:** nothing to port. D3 is MCP-only (D9).
+
+**PR title / squash commit message:** `fix: name the repeated values in key_columns`
