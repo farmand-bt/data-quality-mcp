@@ -111,7 +111,8 @@ Each one reports evidence, not a verdict, and was checked against the problems `
   - **Cleaning:** happens only through `method: "sentinel"` with the codes the caller confirmed.
 - **Repeated IDs** (`key_columns` in `DuplicateInfo`, `profiler_core/duplicates.py`):
   - **What counts as a key:** a column named `id`/`key`/`uuid`/`guid`, or ending in one after `_`, `-`, a space or a camelCase boundary. Its values must also be ≥ 95% distinct once exact duplicates are removed, which keeps foreign keys out.
-  - **What is reported:** IDs found on rows with different data.
+  - **What is reported:** IDs found on rows with different data. `sample_values` holds the IDs themselves (at most 10), and `sample_indices` the row positions holding them. The recommendation names the ID and calls the numbers "0-based row positions", because in manual testing a model read bare row numbers as the IDs.
+  - **JSON form of an ID** (`duplicates.key_value`): integers and strings as stored, and a whole float below 2**53 as an integer. Bools, ±inf and timestamps become strings, so a stored `"inf"` looks the same as a real infinity.
 - **ISO dates in a CSV** (`type_detector.py`): text that is all ISO 8601, in one timezone convention, isn't a type mismatch for CSV input, which has no date type. The report builders get the format from the loader's extension. XLSX text dates, other formats and mixed formats stay mismatches.
 - **Not scored:** the score formula is unchanged. These findings describe values that are already scored (missing, outliers) or are judgement calls (repeated IDs).
 - **Speed:** at 500,000 × 10, `profile_dataset` takes about 3.8 s (3.0 s before Milestone 3.5). Type detection parses each distinct value once, and the deduplicated-row mask is computed once per report.

@@ -101,8 +101,12 @@ class KeyColumnInfo(TypedDict):
     column: str
     conflicting_values: int  # key values on more than one non-identical row
     conflicting_rows: int
+    # The conflicting values themselves, in the order of their first row,
+    # capped at MAX_KEY_SAMPLE_VALUES; never null or +/-inf (see
+    # duplicates.key_value). They don't pair up with sample_indices item by item.
+    sample_values: list[int | float | str]
     sample_indices: list[int]
-    indices_truncated: bool
+    indices_truncated: bool  # refers to sample_indices only
 
 
 class DuplicateInfo(TypedDict):

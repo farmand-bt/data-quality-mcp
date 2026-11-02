@@ -1,6 +1,6 @@
 # Milestone 3.5: Profiling Follow-ups
 
-> **Status: complete; the Amendment (0.4.1) is not implemented yet.** The spec was approved in #13 and implemented on `feat/milestone-3.5`. See **As built** for figures and small differences. The **Amendment** at the end adds the conflicting key values to `key_columns`.
+> **Status: complete, including the Amendment (0.4.1).** The spec was approved in #13 and implemented on `feat/milestone-3.5`; the Amendment was approved in #18 and implemented on `fix/key-sample-values`. See **As built** for figures and small differences. The **Amendment** at the end adds the conflicting key values to `key_columns`.
 > Shared context (architecture, report schema, design decisions) is in [project-overview.md](project-overview.md). Where this spec changes the report schema (see **Schema changes**, and the Amendment's own **Schema changes**), **this spec wins** until the implementation PR updates the overview. The previous milestone is [milestone-3.md](milestone-3.md). Its D9 deferred these items to "a separate short spec after M3". The milestone sits between M3 and M4, so M4 (remote deployment) and M5 keep their numbers.
 
 **Goal:** Make the report say more about *why* data is dirty, not only *how much*. It adds four things:
@@ -321,5 +321,21 @@ class KeyColumnInfo(TypedDict):      # + one field
 7. **Version 0.4.1,** in `pyproject.toml`, `src/data_quality_mcp/__init__.py` and the project's entry in `uv.lock`. D9 gave new report fields a minor version, but minor versions now follow milestones. So an addition between milestones takes a patch version, and M4 is still 0.5.0.
 
 **Analyzer:** nothing to port. D3 is MCP-only (D9).
+
+### As built (0.4.1)
+
+- **Fixture:** `sample_values` is `[484]`, and the warning reads exactly as specified: "'id' looks like a row identifier, but its value 484 appears on 2 rows with different data (0-based row positions 13, 65): ...".
+- **Code:**
+  - `duplicates.key_value` gives the JSON form.
+  - `key_columns` takes `max_sample_values`, and `analyze_duplicates` takes `max_key_sample_values`.
+  - `conflicting_values` is now counted from the same deduplicated list as `sample_values`. Its result is unchanged.
+  - The message is built in `recommendations._key_message`. A report without `sample_values`, as in the recommendation tests, gets "one of its values appears ...".
+- **Values pandas counts as equal:** `1`, `1.0` and `True` in a mixed column are one conflicting value, shown in the first row's form. A test pins this.
+- **Output validation through the tools** (task 4): an `inf` ID and a `"007"` ID pass for both `find_duplicates` and `profile_dataset`, as `"inf"` and `"007"`, and the result serialises with `allow_nan=False`. Both output schemas publish `sample_values` items as integer, number or string.
+- **Tests:** 567 pass (33 new) on Python 3.12 / pandas 3 and on Python 3.10 / pandas 2.3.3, with 98% coverage. Text IDs stay strings on both pandas versions (`object` and `str` dtypes).
+- **Small differences from the amendment's wording:**
+  - **Floats print with `repr`, not `_number`.** `_number` prints a whole float with `:.0f`, which is fine for sentinels. But the floats that reach `sample_values` are either non-integral (the same output either way) or whole numbers at or above 2**53, kept as floats on purpose. `_number` would have printed `1e20` as a 21-digit integer and `1e300` as 301 digits, against the rule that the message and the field agree. With `repr`, the message says `1e+20`, as the field does. (Found in the pre-PR review.)
+  - **Strings print with `json.dumps(value, ensure_ascii=False)`,** so a non-ASCII ID prints as stored (`"café"`, not `"café"`). Quotes, backslashes and newlines are still escaped.
+- **Version:** 0.4.1.
 
 **PR title / squash commit message:** `fix: name the repeated values in key_columns`

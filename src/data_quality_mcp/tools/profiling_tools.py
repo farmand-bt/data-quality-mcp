@@ -106,7 +106,9 @@ def profile_dataset(
       nothing found, which is consistent with random gaps but doesn't prove
       them. null means not tested: no missing values, too few missing or
       present rows, or past the first 50 columns with missing values.
-    - duplicates: see find_duplicates (includes key_columns, repeated IDs).
+    - duplicates: see find_duplicates (includes key_columns, repeated IDs:
+      quote the IDs from sample_values, not sample_indices, which are row
+      positions).
       correlations: see analyze_correlations.
     - generated_at: UTC timestamp.
 
@@ -190,10 +192,17 @@ def find_duplicates(
       ending in one, e.g. customer_id, orderKey, CustomerID) whose values are
       nearly all distinct once exact duplicate rows are removed (so a foreign
       key that repeats by design is left out). For each: conflicting_values
-      (IDs found on rows with different data), conflicting_rows and
-      sample_indices. Two records under one ID usually mean one is outdated
+      (IDs found on rows with different data), conflicting_rows,
+      sample_values (the repeated IDs themselves, at most 10, in the order of
+      their first row) and sample_indices (the row positions holding them,
+      several per ID, so the two lists don't pair up item by item). Quote IDs
+      from sample_values, never from sample_indices. sample_values keeps
+      integers and strings as stored (a whole float such as 484.0 is shown
+      as 484); bools, +/-inf and timestamps are given as strings ("true",
+      "inf", ISO 8601). Two records under one ID usually mean one is outdated
       or corrected: decide which is right before deduplicating. A key column
-      with no conflicts is listed with zeros; [] means no key column found.
+      with no conflicts is listed with zeros and sample_values []; [] for
+      key_columns means no key column found.
     Indices are 0-based data-row positions (CSV line = index + 2), sorted and
     capped at 50; indices_truncated is true when a list was cut.
 
