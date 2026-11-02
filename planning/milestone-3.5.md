@@ -367,7 +367,7 @@ class KeyColumnInfo(TypedDict):      # + one field
 - **Edge cases:**
   - Unchanged: fewer than 2 categories on either side gives 0.0, and fewer than `MIN_CORRELATION_ROWS` shared rows gives `null` (D5).
   - New: chance-level association gives 0.0, because the corrected phi² is floored at 0.
-  - The denominator is positive from 10 rows with at least 2 categories on each side.
+  - The denominator, min(r − 1, c − 1) after the correction, is (k − 1)(1 − (k − 1)/(n − 1)) for k categories on n rows. It is positive unless a column has a different value on every shared row (k = n). That case gives 0.0, as the existing helper does: such a table carries no evidence of association.
 - **Not changed:** the 0.9 threshold, the column and cardinality caps, rounding to 4 decimals, the ordering of `high_correlation_pairs`, and the recommendation wording. The recommendation keeps the label "Cramér's V", as D1's messages already do for the corrected value.
 
 ### Schema changes
