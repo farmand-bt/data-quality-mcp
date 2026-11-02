@@ -90,6 +90,86 @@ def test_high_cardinality_threshold_is_a_parameter():
     assert infer_type(series, high_cardinality_threshold=0.8)[0] == "categorical"
 
 
+# --- ruling out dates early: the result must equal parsing every value ---
+
+_DATES = [str(d.date()) for d in pd.date_range("2000-01-01", periods=9000, freq="D")]
+_JUNK = [f"note {i}" for i in range(9000)]
+
+
+def _interleave(dates: int, junk: int) -> list[str]:
+    """`dates` dates and `junk` free-text values, spread evenly."""
+    values = _DATES[:dates] + _JUNK[:junk]
+    order = np.argsort(np.arange(len(values)) % 7, kind="stable")
+    return [values[i] for i in order]
+
+
+DATE_CASES = {
+    "free text": _JUNK[:5000],
+    "a quarter junk": _interleave(6000, 2000),
+    "exactly at the threshold": _interleave(8000, 2000),
+    "just below the threshold": _interleave(7999, 2001),
+    "junk first, then dates": _JUNK[:1500] + _DATES[:8500],
+    "one junk value on many rows": ["n/a"] * 3000 + _DATES[:7000],
+    "dates on many rows, junk unique": _DATES[:20] * 400 + _JUNK[:2000],
+    "naive values, then mixed offsets": _DATES[:1500]
+    + [f"2020-01-01T10:00:00{tz}" for tz in ("Z", "+02:00")] * 300,
+}
+
+
+@pytest.mark.parametrize("values", DATE_CASES.values(), ids=DATE_CASES.keys())
+def test_ruling_out_dates_early_gives_the_full_parse_result(values):
+    from data_quality_mcp.profiler_core.type_detector import (
+        _DATETIME_THRESHOLD,
+        _date_mask,
+        parse_datetimes,
+    )
+
+    codes, uniques = pd.factorize(pd.Series(values, dtype=object))
+    uniques = pd.Series(uniques, dtype=object)
+    full = parse_datetimes(uniques).notna().to_numpy()
+    mask = _date_mask(uniques, np.bincount(codes))
+    if mask is None:
+        assert full[codes].mean() < _DATETIME_THRESHOLD
+    else:
+        assert (mask == full).all()
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    [
+        (_interleave(8000, 2000), ("datetime", True)),
+        (_interleave(7999, 2001), ("text", False)),
+        (["n/a"] * 3000 + _DATES[:7000], ("text", False)),
+    ],
+)
+def test_the_date_threshold_is_unchanged(values, expected):
+    assert infer_type(pd.Series(values, dtype=object)) == expected
+
+
+def test_free_text_is_ruled_out_after_a_fraction_of_its_values(monkeypatch):
+    from data_quality_mcp.profiler_core import type_detector
+
+    parsed = []
+    parse_mixed = type_detector._parse_mixed
+
+    def spy(series):
+        parsed.append(len(series))
+        return parse_mixed(series)
+
+    monkeypatch.setattr(type_detector, "_parse_mixed", spy)
+    assert infer_type(pd.Series(_JUNK, dtype=object)) == ("text", False)
+    assert sum(parsed) == 2000  # 20% of 9000 is 1800: two chunks of 1000
+
+
+def test_a_chunk_needing_the_last_fallback_parses_the_whole_column(monkeypatch):
+    from data_quality_mcp.profiler_core import type_detector
+
+    monkeypatch.setattr(type_detector, "_parse_mixed", lambda series: None)
+    uniques = pd.Series(_DATES[:3000], dtype=object)
+    mask = type_detector._date_mask(uniques, np.ones(3000, dtype=int))
+    assert mask is not None and mask.all()
+
+
 # --- stats ---
 
 
