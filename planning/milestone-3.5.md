@@ -49,6 +49,7 @@ Three items change behaviour that M1–M3 ported from the analyzer: D4 (dates), 
 | Correlations below 10 shared rows | computed (r = ±1 from 2 rows) | `null` (D5) | Not meaningful; port back |
 | `fill_mean` / `fill_median` | include ±inf | finite values only (D6) | Consistent with the stats and `cap_iqr`; port back |
 | Sentinels, duplicate keys, `method: "sentinel"` | not present | new (D2, D3, D7) | New heuristics; analyzer candidates |
+| Cramér's V in the correlations section | plain V, SciPy's Yates correction on 2 × 2 | bias-corrected V, no Yates (Amendment, 0.4.3) | Sparse-table bias gives chance high pairs; port back |
 
 ## Schema changes (proposed)
 
@@ -227,7 +228,7 @@ New settings in `config.py`, each passed to the core as a keyword parameter:
 - **Small differences from the spec's wording:**
   - The report builders take `input_format` (".csv" or ".xlsx"). Without it, as for a direct call with a DataFrame, the M1 rule applies, so ISO text stays a mismatch.
   - A single-column dataset has no other column to tell rows apart, so rows sharing a value are exact duplicate rows. The repeat test then never fires, and only the all-9s test can list a value. This follows from D2's definition, and a test documents it.
-  - The correlations section's Cramér's V keeps SciPy's default Yates correction on 2 × 2 tables (analyzer parity). D1's bias-corrected V uses none, as specified.
+  - The correlations section's Cramér's V keeps SciPy's default Yates correction on 2 × 2 tables (analyzer parity). D1's bias-corrected V uses none, as specified. (Superseded by the Amendment: bias-corrected Cramér's V, 0.4.3.)
   - Recommendations read the new fields with `.get`, so a report built without them (as in the recommendation tests) still works.
 - **Tests:** 534 pass on Python 3.12 / pandas 3 and on Python 3.10 / pandas 2, with 98% coverage.
 - **Version:** 0.4.0.
@@ -357,12 +358,23 @@ class KeyColumnInfo(TypedDict):      # + one field
 | 500 | 50 × 50 | 0.313 | 0% | 0.022 | 0% |
 | 5,000 | 50 × 50 | 0.099 | 0% | 0.007 | 0% |
 
-- **Power on real associations is unchanged.** On a 5 × 5 table where one column copies the other with probability q: at q = 0.95, both values reach 0.9 in 100% of trials at 100 rows. At 20 rows that is 86% for plain V and 80% for corrected V. A perfect association gives 1.0 with both.
+- **One-to-one associations are found as before.** On a 5 × 5 table where one column copies the other with probability q: at q = 0.95, both values reach 0.9 in 100% of trials at 100 rows. At 20 rows that is 86% for plain V and 80% for corrected V. A perfect one-to-one association gives 1.0 with both.
+- **Many-to-one associations need more rows (the trade-off).** When one column determines the other (city → region), plain V is 1.0 at any size. The corrected V subtracts what chance would give the larger table, so it stays below 1 until each level of the larger column has several rows. Deterministic k levels → m groups (50 seeded trials; mean corrected V, and the share ≥ 0.9):
+
+  | k → m | 20 rows | 50 rows | 100 rows | 200 rows | 500 rows | 5,000 rows |
+  |---|---:|---:|---:|---:|---:|---:|
+  | 4 → 2 | 0.943 / 100% | 0.979 / 100% | 0.990 / 100% | 0.995 / 100% | 0.998 / 100% | 1.000 / 100% |
+  | 10 → 2 | 0.792 / 0% | 0.914 / 100% | 0.958 / 100% | 0.980 / 100% | 0.992 / 100% | 0.999 / 100% |
+  | 20 → 4 | 0.653 / 0% | 0.825 / 0% | 0.913 / 100% | 0.958 / 100% | 0.984 / 100% | 0.998 / 100% |
+  | 50 → 2 | | 0.607 / 0% | 0.762 / 0% | 0.873 / 0% | 0.951 / 100% | 0.995 / 100% |
+  | 50 → 10 | | 0.678 / 0% | 0.794 / 0% | 0.891 / 0% | 0.958 / 100% | 0.996 / 100% |
+
+  So a redundant pair is listed once the larger column has about 5 rows per level for 10–20 levels, and about 10 for 50. Below that, it is a high pair today and won't be after the change. **Accepted:** these are the same sparse tables on which plain V lists unrelated columns (2 × 50 on 20 rows: 48.5%). A "potential feature redundancy" warning on a few rows per level is weak evidence either way, and, as in D1, a false listing is the worse error for an evidence-only field. The value itself is still reported (0.76 for 50 → 2 on 100 rows, against about 0.1 for unrelated columns).
 - **On the fixture:** the only categorical pair, `neighborhood`↔`garage` (a 4 × 8 table), goes from 0.1197 to 0.0292. Neither value is a high pair, and the score doesn't use correlations. So every fixture figure stays the same except that one value.
 
 **Decision.** The correlations section uses D1's bias-corrected Cramér's V (Bergsma 2013).
 - **Formula:** `missing.corrected_cramers_v` moves to `correlations.py`, and `missing.py` imports it from there. D1's results are unchanged.
-- **Chi-square without Yates' correction,** as in D1. SciPy applies Yates by default on 2 × 2 tables, where it lowers chi². With the bias correction on top, that would correct twice. As a result, a 2 × 2 pair on a few rows can come out slightly higher than today. At 10 rows, the chance mean is 0.147 against 0.110.
+- **Chi-square without Yates' correction,** as in D1. SciPy applies Yates by default on 2 × 2 tables, where it lowers chi². With the bias correction on top, that would correct twice. As a result, 2 × 2 pairs on a few rows come out higher than today. At 10 rows, the chance mean is 0.147 against 0.110. A perfectly matching boolean pair gives 1.0 instead of about (n − 2)/n with Yates (exactly that for a balanced pair: 0.80 at 10 rows, 0.9 only from 20), so such a pair on 10 to 19 shared rows newly becomes a high pair, with its recommendation.
 - **The table stays as it is:** the rows where both values are present, with every category kept. D1 leaves out categories with fewer than 5 rows because of its chi-square p-value. The correlations section reports no p-value, and the correction already accounts for sparse cells.
 - **Edge cases:**
   - Unchanged: fewer than 2 categories on either side gives 0.0, and fewer than `MIN_CORRELATION_ROWS` shared rows gives `null` (D5).
@@ -378,23 +390,29 @@ None. `CorrelationInfo.cramers_v` keeps its type (`dict[str, dict[str, float | N
 
 1. **`profiler_core/correlations.py`:**
    - `cramers_v` returns the bias-corrected value, from a chi-square without Yates' correction.
-   - Its table is counted with numpy (factorize, then bincount) instead of `pd.crosstab`, as D1's tables are. The cells are the same, and `crosstab` is most of the section's time on wide data (1.7 s of 2.4 s at 50,000 rows with 15 categorical columns).
-   - `corrected_cramers_v` moves here, and `missing.py` imports it.
+   - Its table is counted with numpy instead of `pd.crosstab`, which is most of the section's time on wide data (1.7 s of 2.4 s at 50,000 rows with 15 categorical columns). Both columns are factorized **on the shared rows only** (both values present), then counted with bincount. So a category that only appears where the other column is missing gets no all-zero row, as with `crosstab`. (D1 factorizes the whole column and relies on its 5-row filter to drop empty categories. Here every category is kept, so that pattern would leave zero rows. Those would make `chi2_contingency` raise, and they would inflate the table's shape in the correction and in the "fewer than 2 categories" check.)
+   - `corrected_cramers_v` moves here, and `missing.py` imports it. Its docstring, which contrasts it with "the plain V of the correlations section", is rewritten.
+   - `profiler_core/schema.py`: the `CorrelationInfo` docstring names the bias-corrected V.
    - The module docstring lists this as a deviation from the analyzer until the port-back.
-2. **Docstrings:** in `analyze_correlations` and `profile_dataset`, `cramers_v` becomes "bias-corrected Cramér's V (0 to 1; near 0 for unrelated columns, even on few rows)".
+2. **Docstrings:**
+   - in `analyze_correlations`, `cramers_v` becomes "bias-corrected Cramér's V (0 to 1; near 0 for unrelated columns, even on few rows)". `profile_dataset` only points to `analyze_correlations` for this section.
+   - `profile_dataset`'s line "correlations: see analyze_correlations." gets its missing "- " bullet.
+   - `profile_dataset`'s `missing_related_to` description gets "bias-corrected" before its `cramers_v`, so the two uses read alike.
 3. **Docs:**
-   - `docs/architecture.md`, the correlations bullet
+   - `docs/architecture.md`: the correlations bullet, and the parity paragraph, which says the correlation logic uses "the same methods" (it links to this spec's deviations)
+   - `planning/project-overview.md`: the schema paragraph that lists the M3.5 additions
    - D5's last sentence, which gets a pointer to this amendment
-   - an As built for this amendment, and the status line at the top
+   - the first As built's Yates note (already marked superseded by this spec PR), an As built for this amendment, and the status line at the top
 4. **Tests:**
    - two independent 50-level columns on 20 rows (seeded) give a low value and no high pair. Today they give ≥ 0.9.
-   - a perfect association gives 1.0, including on a 2 × 2 table
+   - a perfect one-to-one association gives 1.0, including on a 2 × 2 table, and a matching boolean pair on 10 shared rows is a high pair
+   - a deterministic 10 → 2 mapping on 20 rows gives a value below 0.9 and no high pair, and on 100 rows a high pair (the trade-off above)
    - the fixture pair is 0.0292
    - a 2 × 2 table uses no Yates' correction: the value equals the corrected formula on the uncorrected chi²
-   - the numpy table gives the same value as a `crosstab` table on columns with missing values, on both pandas versions
-   - existing tests updated: `test_cramers_v_needs_ten_shared_rows` (its comment names Yates) and any exact Cramér's V value
-5. **Version 0.4.3** (a patch version, as for 0.4.1), in `pyproject.toml`, `src/data_quality_mcp/__init__.py` and `uv.lock`.
+   - the numpy table gives the same value as a `crosstab` table on columns with missing values, including a category that appears only where the other column is missing, on both pandas versions
+   - existing tests updated: `test_cramers_v_needs_ten_shared_rows` (its comment names Yates; frame(10) goes from 0.8 to 1.0 and gains a high pair) and any exact Cramér's V value
+5. **Version 0.4.3** (a patch version, as for 0.4.1), in `pyproject.toml`, `src/data_quality_mcp/__init__.py` and `uv.lock`. This assumes #20 (0.4.2) merges first; otherwise this is 0.4.2.
 
 **Analyzer:** port it back after the merge, so the two stay consistent.
-- `profiler/correlations.py` `_cramers_v` gets the same formula. The analyzer's `profiler/missing.py` already has `corrected_cramers_v`.
-- The same port-back PR carries #20's date speed-up for `profiler/type_detector.py`. The analyzer parses every value, without the distinct-value step this repo has, so that step is ported with it.
+- `profiler/correlations.py` `_cramers_v` gets the same formula and the numpy table from shared-row codes. The analyzer's `profiler/missing.py` already has `corrected_cramers_v`. Its correlations caption describes V without the formula, so it stays.
+- After both this implementation and #20 merge, the same port-back PR carries #20's date speed-up for `profiler/type_detector.py`. The analyzer parses every value, without the distinct-value step this repo has, so that step is ported with it.
