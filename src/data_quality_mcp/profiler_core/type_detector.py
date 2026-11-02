@@ -55,8 +55,7 @@ def parse_datetimes(series: pd.Series) -> pd.Series:
 def _parse_mixed(series: pd.Series) -> pd.Series | None:
     """parse_datetimes without its last fallback: None if neither format="mixed"
     option gives datetimes. format="mixed" parses each value individually, so
-    a column mixing ISO dates, MM/DD/YYYY and "15-Jan-2020" still parses, and
-    a value parses the same whatever else is in the series."""
+    a column mixing ISO dates, MM/DD/YYYY and "15-Jan-2020" still parses."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         for options in ({"format": "mixed"}, {"format": "mixed", "utc": True}):
@@ -140,29 +139,35 @@ def infer_type(
 
 
 def _date_mask(uniques: pd.Series, counts: np.ndarray) -> np.ndarray | None:
-    """Which distinct values parse as datetimes (as parse_datetimes would
-    parse them), or None once the rows whose value failed are too many for the
-    column to reach _DATETIME_THRESHOLD. `counts` is each value's row count.
+    """Which distinct values parse as datetimes (parse_datetimes on all of
+    them), or None when the column can't reach _DATETIME_THRESHOLD. `counts`
+    is each value's row count.
 
-    Values are parsed in chunks, which gives the same result because
-    format="mixed" parses each value on its own: free text, where nearly every
-    value fails, is ruled out after about a fifth of its values instead of all
-    of them. A chunk that needs parse_datetimes' last fallback, which infers
-    one format for the whole column, means parsing everything at once instead.
+    Free text is ruled out cheaply first: values are parsed in chunks until
+    the rows whose value failed are too many, after about a fifth of them
+    instead of all. A value that fails in a chunk also fails in the whole
+    column, because a smaller series is parsed under fewer constraints (pandas
+    3 picks one time resolution per series, and a nanosecond timestamp puts
+    dates before 1677 out of range), so this never rules out a column that
+    would pass. A column that isn't ruled out is parsed whole, and chunking
+    stops as soon as the values so far look like dates, so a date column is
+    parsed about once.
     """
     total = int(counts.sum())
-    parsed = np.zeros(len(uniques), dtype=bool)
-    failed = 0
+    failed = seen = 0
     for start in range(0, len(uniques), _DATE_CHUNK):
         stop = start + _DATE_CHUNK
         chunk = _parse_mixed(uniques.iloc[start:stop])
         if chunk is None:
-            return parse_datetimes(uniques).notna().to_numpy()
-        parsed[start:stop] = chunk.notna().to_numpy()
-        failed += int(counts[start:stop][~parsed[start:stop]].sum())
+            break  # needs parse_datetimes' last fallback, on the whole column
+        weights = counts[start:stop]
+        failed += int(weights[chunk.isna().to_numpy()].sum())
+        seen += int(weights.sum())
         if (total - failed) / total < _DATETIME_THRESHOLD:
             return None  # even if every other value parsed
-    return parsed
+        if (seen - failed) / seen >= _DATETIME_THRESHOLD:
+            break
+    return parse_datetimes(uniques).notna().to_numpy()
 
 
 def _all_iso(values: pd.Series) -> bool:

@@ -1,5 +1,6 @@
 import json
 import re
+from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -96,6 +97,12 @@ _DATES = [str(d.date()) for d in pd.date_range("2000-01-01", periods=9000, freq=
 _JUNK = [f"note {i}" for i in range(9000)]
 
 
+def _days(first: date, n: int) -> list[str]:
+    """`n` consecutive ISO dates; built in Python, as pandas 2 can't hold
+    dates outside 1677-2262."""
+    return [str(first + timedelta(days=i)) for i in range(n)]
+
+
 def _interleave(dates: int, junk: int) -> list[str]:
     """`dates` dates and `junk` free-text values, spread evenly."""
     values = _DATES[:dates] + _JUNK[:junk]
@@ -113,6 +120,11 @@ DATE_CASES = {
     "dates on many rows, junk unique": _DATES[:20] * 400 + _JUNK[:2000],
     "naive values, then mixed offsets": _DATES[:1500]
     + [f"2020-01-01T10:00:00{tz}" for tz in ("Z", "+02:00")] * 300,
+    # Standard pre-PR review: out of range only at nanosecond resolution
+    "nanoseconds, then dates after 2262": [
+        f"2020-01-01 00:00:00.{i:09d}" for i in range(1, 1001)
+    ]
+    + _days(date(2300, 1, 1), 4000),
 }
 
 
@@ -132,6 +144,15 @@ def test_ruling_out_dates_early_gives_the_full_parse_result(values):
         assert full[codes].mean() < _DATETIME_THRESHOLD
     else:
         assert (mask == full).all()
+
+
+def test_dates_out_of_range_for_the_whole_column_stay_unparsed():
+    # Codex pre-PR review: on pandas 3 one nanosecond timestamp makes the whole
+    # column nanosecond resolution, where dates before 1677 don't fit; a chunk
+    # without it parsed them, so the column passed with half its values
+    values = _days(date(1500, 1, 1), 500) + _days(date(2000, 1, 1), 500)
+    values.append("2020-01-01 00:00:00.123456789")
+    assert infer_type(pd.Series(values, dtype=object)) == ("text", False)
 
 
 @pytest.mark.parametrize(
@@ -158,7 +179,10 @@ def test_free_text_is_ruled_out_after_a_fraction_of_its_values(monkeypatch):
 
     monkeypatch.setattr(type_detector, "_parse_mixed", spy)
     assert infer_type(pd.Series(_JUNK, dtype=object)) == ("text", False)
-    assert sum(parsed) == 2000  # 20% of 9000 is 1800: two chunks of 1000
+    assert parsed == [1000, 1000]  # 20% of 9000 is 1800
+    parsed.clear()
+    assert infer_type(pd.Series(_DATES, dtype=object))[0] == "datetime"
+    assert parsed == [1000, 9000]  # one chunk, then the whole column
 
 
 def test_a_chunk_needing_the_last_fallback_parses_the_whole_column(monkeypatch):

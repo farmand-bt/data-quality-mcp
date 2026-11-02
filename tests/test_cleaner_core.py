@@ -1005,6 +1005,18 @@ def test_candidates_come_from_the_original_input(messy_frame):
     [
         ([{"action": "handle_outliers", "column": "price", "strategy": "remove"}], 0),
         ([_sentinel_step(values=FIXTURE_CODES)], 1),
+        (
+            [
+                _sentinel_step(values=FIXTURE_CODES),
+                {
+                    "action": "handle_outliers",
+                    "column": "school_rating",
+                    "strategy": "remove",
+                    "method": "zscore",
+                },
+            ],
+            1,
+        ),
     ],
 )
 def test_only_a_sentinel_step_computes_the_dedup_mask(
