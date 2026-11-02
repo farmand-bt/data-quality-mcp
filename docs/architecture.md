@@ -115,7 +115,8 @@ Each one reports evidence, not a verdict, and was checked against the problems `
   - **JSON form of an ID** (`duplicates.key_value`): integers and strings as stored, and a whole float below 2**53 as an integer. Bools, ±inf and timestamps become strings, so a stored `"inf"` looks the same as a real infinity.
 - **ISO dates in a CSV** (`type_detector.py`): text that is all ISO 8601, in one timezone convention, isn't a type mismatch for CSV input, which has no date type. The report builders get the format from the loader's extension. XLSX text dates, other formats and mixed formats stay mismatches.
 - **Not scored:** the score formula is unchanged. These findings describe values that are already scored (missing, outliers) or are judgement calls (repeated IDs).
-- **Speed:** at 500,000 × 10, `profile_dataset` takes about 3.8 s (3.0 s before Milestone 3.5). Type detection parses each distinct value once, and the deduplicated-row mask is computed once per report.
+- **Speed:** at 500,000 × 10, `profile_dataset` takes about 3.8 s (3.0 s before Milestone 3.5). Type detection parses each distinct value once, and the deduplicated-row mask is computed once per report (in the cleaner, only for a sentinel step, the one step that reads it).
+- **Ruling out dates:** a text column stops being parsed for dates once more than a fifth of its rows hold values that failed, because it can no longer reach the 80% threshold. Values are parsed in chunks of 1,000. A value that fails in a chunk also fails in the whole column (pandas 3 picks one time resolution per series, so a nanosecond timestamp puts dates before 1677 out of range for all of them), and a column that isn't ruled out is parsed whole, so the result is the same as before. On a 50,000 × 100 file with 15 free-text columns, `profile_dataset` takes about 10 s instead of 20 s.
 
 ## Input
 

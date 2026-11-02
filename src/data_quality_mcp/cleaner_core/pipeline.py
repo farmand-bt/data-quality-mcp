@@ -125,7 +125,13 @@ def _validate(
     """Check the static rules; return the input's outlier rows per column and
     method for every handle_outliers step."""
     seen: set[tuple[str, str]] = set()
-    kept = ~df.duplicated(keep="first")  # as detect_outliers, for sentinels
+    # As detect_outliers, for sentinels. Only a sentinel step reads the result,
+    # and hashing every row is the cost on a large file, so other plans skip it
+    kept = (
+        ~df.duplicated(keep="first")
+        if any(s.get("method") == "sentinel" for s in steps)
+        else None
+    )
     dropped = {
         s["column"]
         for s in steps

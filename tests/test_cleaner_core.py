@@ -998,3 +998,38 @@ def test_candidates_come_from_the_original_input(messy_frame):
     out, log = run_steps(messy_frame, steps)
     assert not out["price"].isin(FIXTURE_CODES).any()
     assert {e["action"]: e for e in log}["handle_outliers"]["outliers_treated"] == 10
+
+
+@pytest.mark.parametrize(
+    ("steps", "hashes"),
+    [
+        ([{"action": "handle_outliers", "column": "price", "strategy": "remove"}], 0),
+        ([_sentinel_step(values=FIXTURE_CODES)], 1),
+        (
+            [
+                _sentinel_step(values=FIXTURE_CODES),
+                {
+                    "action": "handle_outliers",
+                    "column": "school_rating",
+                    "strategy": "remove",
+                    "method": "zscore",
+                },
+            ],
+            1,
+        ),
+    ],
+)
+def test_only_a_sentinel_step_computes_the_dedup_mask(
+    messy_frame, monkeypatch, steps, hashes
+):
+    # The mask hashes every row and only sentinel candidates use it
+    calls = []
+    duplicated = pd.DataFrame.duplicated
+
+    def spy(self, *args, **kwargs):
+        calls.append(len(self))
+        return duplicated(self, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "duplicated", spy)
+    run_steps(messy_frame, steps)
+    assert len(calls) == hashes

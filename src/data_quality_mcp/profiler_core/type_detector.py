@@ -15,6 +15,8 @@ from data_quality_mcp import config
 # Fraction of non-null values that must parse for a column to count as that type
 _NUMERIC_THRESHOLD = 0.80
 _DATETIME_THRESHOLD = 0.80
+# Distinct values parsed per round when checking a column for dates
+_DATE_CHUNK = 1_000
 _BOOL_VALUES = {"true", "false", "yes", "no", "y", "n"}
 # ISO 8601 date, optionally with a time and then a timezone (Z or +HH:MM); the
 # timezone can only follow a time, so "2020-01-15" never reads as an offset
@@ -34,20 +36,36 @@ def parse_datetimes(series: pd.Series) -> pd.Series:
     and stats, so naive values among them being read as UTC doesn't change the
     data.
     """
+    parsed = _parse_mixed(series)
+    if parsed is not None:
+        return parsed
+    # The plain fallback infers one format from the first value and would
+    # silently null differently formatted ones, so it comes last
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        # format="mixed" parses each value individually, so a column mixing
-        # ISO dates, MM/DD/YYYY and "15-Jan-2020" still parses.
-        # UTC comes before the plain fallback, which infers one format from the
-        # first value and would silently null differently formatted ones
-        for options in ({"format": "mixed"}, {"format": "mixed", "utc": True}, {}):
+        try:
+            parsed = pd.to_datetime(series, errors="coerce")
+        except (TypeError, ValueError):
+            parsed = None
+    if parsed is not None and pd.api.types.is_datetime64_any_dtype(parsed.dtype):
+        return parsed
+    return pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+
+
+def _parse_mixed(series: pd.Series) -> pd.Series | None:
+    """parse_datetimes without its last fallback: None if neither format="mixed"
+    option gives datetimes. format="mixed" parses each value individually, so
+    a column mixing ISO dates, MM/DD/YYYY and "15-Jan-2020" still parses."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for options in ({"format": "mixed"}, {"format": "mixed", "utc": True}):
             try:
                 parsed = pd.to_datetime(series, errors="coerce", **options)
             except (TypeError, ValueError):
                 continue
             if pd.api.types.is_datetime64_any_dtype(parsed.dtype):
                 return parsed
-    return pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+    return None
 
 
 def has_inconsistent_casing(series: pd.Series) -> bool:
@@ -106,18 +124,50 @@ def infer_type(
         # one), then weight by how often it occurs: same ratio, far less work
         # on repetitive columns
         codes, uniques = pd.factorize(non_null)
-        parsed = parse_datetimes(pd.Series(uniques, dtype=object))
-        datetime_ratio = float(parsed.notna().to_numpy()[codes].mean())
-        if datetime_ratio >= _DATETIME_THRESHOLD:
+        uniques = pd.Series(uniques, dtype=object)
+        parsed = _date_mask(uniques, np.bincount(codes, minlength=len(uniques)))
+        if parsed is not None and float(parsed[codes].mean()) >= _DATETIME_THRESHOLD:
             # CSV has no date type, so ISO text is how a CSV stores dates
             # (planning/milestone-3.5.md, D4)
-            iso = iso_dates_typed and _all_iso(pd.Series(uniques, dtype=object))
+            iso = iso_dates_typed and _all_iso(uniques)
             return "datetime", not iso
 
     cardinality_ratio = non_null.nunique() / len(non_null)
     if cardinality_ratio <= high_cardinality_threshold:
         return "categorical", False
     return "text", False
+
+
+def _date_mask(uniques: pd.Series, counts: np.ndarray) -> np.ndarray | None:
+    """Which distinct values parse as datetimes (parse_datetimes on all of
+    them), or None when the column can't reach _DATETIME_THRESHOLD. `counts`
+    is each value's row count.
+
+    Free text is ruled out cheaply first: values are parsed in chunks until
+    the rows whose value failed are too many, after about a fifth of them
+    instead of all. A value that fails in a chunk also fails in the whole
+    column, because a smaller series is parsed under fewer constraints (pandas
+    3 picks one time resolution per series, and a nanosecond timestamp puts
+    dates before 1677 out of range), so this never rules out a column that
+    would pass. A column that isn't ruled out is parsed whole, and chunking
+    stops as soon as the values so far look like dates, so a date column is
+    parsed about once.
+    """
+    total = int(counts.sum())
+    failed = seen = 0
+    for start in range(0, len(uniques), _DATE_CHUNK):
+        stop = start + _DATE_CHUNK
+        chunk = _parse_mixed(uniques.iloc[start:stop])
+        if chunk is None:
+            break  # needs parse_datetimes' last fallback, on the whole column
+        weights = counts[start:stop]
+        failed += int(weights[chunk.isna().to_numpy()].sum())
+        seen += int(weights.sum())
+        if (total - failed) / total < _DATETIME_THRESHOLD:
+            return None  # even if every other value parsed
+        if (seen - failed) / seen >= _DATETIME_THRESHOLD:
+            break
+    return parse_datetimes(uniques).notna().to_numpy()
 
 
 def _all_iso(values: pd.Series) -> bool:
