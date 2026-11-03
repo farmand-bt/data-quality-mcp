@@ -105,8 +105,8 @@ def profile_dataset(
       verdict: if gaps depend on another column, a mean or median fill
       biases the column. [] means tested and nothing found, which is
       consistent with random gaps but doesn't prove them. null means not
-      tested: no missing values, too few missing or
-      present rows, or past the first 50 columns with missing values.
+      tested: no missing values, too few missing or present rows, or past
+      the first 50 columns with missing values.
     - duplicates: see find_duplicates (includes key_columns, repeated IDs:
       quote the IDs from sample_values, not sample_indices, which are row
       positions).
