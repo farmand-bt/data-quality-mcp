@@ -39,7 +39,8 @@ def corrected_cramers_v(chi2: float, n: int, shape: tuple[int, int]) -> float:
 def cramers_v(x: pd.Series, y: pd.Series) -> float:
     """Bias-corrected Cramér's V between two categorical series (0 to 1), over
     the rows where both are present; 0.0 when either has fewer than 2
-    categories there."""
+    categories there. Rows are matched by index label, as pd.crosstab does."""
+    x, y = x.align(y, join="inner")
     return _cramers_v_codes(pd.factorize(x)[0], pd.factorize(y)[0])
 
 

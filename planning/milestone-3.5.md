@@ -426,7 +426,7 @@ None. `CorrelationInfo.cramers_v` keeps its type (`dict[str, dict[str, float | N
   - `compute_correlations` factorizes each categorical column once and passes the codes to `_cramers_v_codes` for every pair. That function keeps the shared rows and renumbers the codes to the categories that occur there, so the table has no empty row or column, as with `crosstab`. The shared-row count for D5's minimum comes from the same codes.
 - **Speed:** at 50,000 × 100 (15 categorical columns, 105 pairs), the correlations section takes 0.4 s instead of 2.0 s, and `profile_dataset` 8.8 s instead of 10.3 s. At 500,000 × 10 it is unchanged (about 4 s).
 - **Small difference from the tasks:** each column is factorized once per report rather than once per pair. That wasn't in the task list. Without it, factorizing strings for every pair took most of the numpy version's time.
-- **Tests:** about a dozen new ones in `tests/test_correlations.py`:
+- **Tests:** 9 new test functions in `tests/test_correlations.py` (18 cases with the parametrized ones):
   - the false high pair before the change
   - one-to-one and 2 × 2
   - the 10 → 2 trade-off at 20 and 100 rows
@@ -436,6 +436,9 @@ None. `CorrelationInfo.cramers_v` keeps its type (`dict[str, dict[str, float | N
   - k = n
   - one category on the shared rows
 
-  `test_cramers_v_needs_ten_shared_rows` now expects 1.0 and a high pair at 10 shared rows.
+  - label alignment, and no shared rows
+
+  `test_cramers_v_needs_ten_shared_rows` now uses a boolean pair and expects 1.0 and a high pair at 10 shared rows. The `crosstab` comparison uses real bools and each kind of missing value (None, NaN, `pd.NA`, NaT).
+- **`cramers_v(x, y)`** aligns the two series by index label first, as `pd.crosstab` did. `compute_correlations` passes positional codes from one frame, so it needs no alignment.
 - **Version:** 0.4.3.
 

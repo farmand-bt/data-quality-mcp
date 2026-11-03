@@ -114,9 +114,9 @@ def test_pearson_needs_ten_shared_rows():
 
 def test_cramers_v_needs_ten_shared_rows():
     def frame(n_shared: int) -> pd.DataFrame:
-        a = ["x", "y"] * 10
-        b = (["x", "y"] * 10)[:n_shared] + [None] * (20 - n_shared)
-        return pd.DataFrame({"a": a, "b": b})
+        a = [True, False] * 10
+        b = ([True, False] * 10)[:n_shared] + [None] * (20 - n_shared)
+        return pd.DataFrame({"a": a, "b": pd.Series(b, dtype=object)})
 
     below = _correlations(frame(9))  # 20 rows, but only 9 shared
     assert below["cramers_v"]["a"]["b"] is None
@@ -223,14 +223,28 @@ def test_the_numpy_table_matches_crosstab(seed):
     rng = np.random.default_rng(seed)
     n = 200
     x = pd.Series([f"x{v}" for v in rng.integers(0, 6, n)], dtype=object)
-    y = pd.Series(list(rng.choice([True, False, "maybe"], n)), dtype=object)
-    x[rng.random(n) < 0.15] = None
-    y[rng.random(n) < 0.15] = None
+    y = pd.Series([[True, False, "maybe"][v] for v in rng.integers(0, 3, n)])
+    y = y.astype(object)  # real bools beside a string
+    nulls = [None, np.nan, pd.NA, pd.NaT]
+    for s in (x, y):
+        for i in np.flatnonzero(rng.random(n) < 0.15):
+            s[i] = nulls[i % len(nulls)]
     # A category that only appears where the other column is missing
     lonely = int(np.flatnonzero(y.isna().to_numpy())[0])
     x[lonely] = "only-here"
     assert cramers_v(x, y) == pytest.approx(_reference_v(x, y), abs=1e-12)
     assert cramers_v(y, x) == pytest.approx(_reference_v(x, y), abs=1e-12)
+
+
+def test_series_are_matched_by_label_and_no_shared_rows_gives_zero():
+    rng = np.random.default_rng(5)
+    x = pd.Series(["a", "b"] * 15)
+    y = pd.Series(["p", "q"] * 15, index=rng.permutation(30))
+    positional = pd.Series(y.to_numpy())
+    assert cramers_v(x, positional) == 1.0  # a different answer by position
+    assert cramers_v(x, y) == pytest.approx(_reference_v(x, y), abs=1e-12)
+    assert cramers_v(x, y) < 1.0
+    assert cramers_v(pd.Series(["a", None]), pd.Series([None, "b"])) == 0.0
 
 
 def test_a_different_value_on_every_shared_row_gives_zero():
