@@ -3,8 +3,14 @@ Analyzer's TestCorrelations."""
 
 import numpy as np
 import pandas as pd
+import pytest
+from scipy.stats import chi2_contingency
 
-from data_quality_mcp.profiler_core.correlations import compute_correlations, cramers_v
+from data_quality_mcp.profiler_core.correlations import (
+    compute_correlations,
+    corrected_cramers_v,
+    cramers_v,
+)
 from data_quality_mcp.profiler_core.type_detector import detect_types
 
 
@@ -112,11 +118,14 @@ def test_cramers_v_needs_ten_shared_rows():
         b = (["x", "y"] * 10)[:n_shared] + [None] * (20 - n_shared)
         return pd.DataFrame({"a": a, "b": b})
 
-    below = _correlations(frame(9))
+    below = _correlations(frame(9))  # 20 rows, but only 9 shared
     assert below["cramers_v"]["a"]["b"] is None
     assert below["high_correlation_pairs"] == []
-    # Computed from 10 rows on (Yates-corrected on a 2x2 table, as in the analyzer)
-    assert _correlations(frame(10))["cramers_v"]["a"]["b"] > 0.5
+    # From 10 shared rows on. Without Yates' correction a matching pair is 1.0
+    # (it was 0.8 with it), so it is a high pair (milestone-3.5.md, Amendment)
+    at = _correlations(frame(10))
+    assert at["cramers_v"]["a"]["b"] == 1.0
+    assert at["high_correlation_pairs"][0]["method"] == "cramers_v"
 
 
 def test_two_rows_no_longer_give_a_perfect_correlation():
@@ -131,3 +140,109 @@ def test_two_rows_no_longer_give_a_perfect_correlation():
     result = _correlations(df)
     assert result["pearson"]["id"]["price"] is None
     assert result["high_correlation_pairs"] == []
+
+
+# --- bias-corrected Cramér's V (planning/milestone-3.5.md, Amendment, 0.4.3) ---
+
+
+def _categorical(df: pd.DataFrame, **kwargs) -> dict:
+    """compute_correlations with every column typed categorical: on few rows,
+    type detection would call a many-level column text."""
+    types = {c: {"inferred_type": "categorical"} for c in df.columns}
+    return compute_correlations(df, types, **kwargs)
+
+
+def _plain_v(x: pd.Series, y: pd.Series) -> float:
+    """The analyzer's plain V (Yates on 2 x 2), the value before 0.4.3."""
+    table = pd.crosstab(x, y)
+    chi2 = chi2_contingency(table)[0]
+    return float(np.sqrt(chi2 / (table.to_numpy().sum() * (min(table.shape) - 1))))
+
+
+def _reference_v(x: pd.Series, y: pd.Series) -> float:
+    """The corrected V from a pd.crosstab table, no Yates' correction."""
+    table = pd.crosstab(x, y)  # drops rows where either value is missing
+    if min(table.shape) < 2:
+        return 0.0
+    chi2 = chi2_contingency(table, correction=False)[0]
+    return corrected_cramers_v(float(chi2), int(table.to_numpy().sum()), table.shape)
+
+
+def test_unrelated_many_level_columns_are_no_longer_a_high_pair():
+    rng = np.random.default_rng(3)
+    df = pd.DataFrame(
+        {
+            "a": [f"a{v}" for v in rng.integers(0, 50, 20)],
+            "b": [f"b{v}" for v in rng.integers(0, 50, 20)],
+        }
+    )
+    assert _plain_v(df["a"], df["b"]) >= 0.9  # the false high pair before
+    result = _categorical(df)
+    assert result["cramers_v"]["a"]["b"] < 0.5
+    assert result["high_correlation_pairs"] == []
+
+
+@pytest.mark.parametrize("levels", [2, 5])
+def test_a_one_to_one_association_is_one(levels):
+    a = [f"x{i % levels}" for i in range(50)]
+    b = [f"y{i % levels}" for i in range(50)]
+    assert cramers_v(pd.Series(a), pd.Series(b)) == 1.0
+
+
+@pytest.mark.parametrize(("rows", "high"), [(20, False), (100, True)])
+def test_a_many_to_one_mapping_needs_rows_per_level(rows, high):
+    # The trade-off the Amendment accepts: 10 levels -> 2 groups is redundant,
+    # but on 2 rows per level the corrected V stays below 0.9
+    rng = np.random.default_rng(10)
+    codes = rng.integers(0, 10, rows)
+    df = pd.DataFrame({"city": [f"c{v}" for v in codes], "region": codes % 2})
+    result = _categorical(df)
+    assert (result["cramers_v"]["city"]["region"] >= 0.9) is high
+    assert bool(result["high_correlation_pairs"]) is high
+
+
+def test_the_fixture_pair(messy_df: pd.DataFrame):
+    assert _correlations(messy_df)["cramers_v"] == {
+        "neighborhood": {"garage": 0.0292},
+        "garage": {},
+    }
+
+
+def test_a_two_by_two_table_has_no_yates_correction():
+    rng = np.random.default_rng(22)
+    x = pd.Series(rng.integers(0, 2, 30))
+    y = pd.Series(np.where(rng.random(30) < 0.7, x, 1 - x))
+    table = pd.crosstab(x, y)
+    chi2 = chi2_contingency(table, correction=False)[0]
+    assert cramers_v(x, y) == corrected_cramers_v(float(chi2), 30, (2, 2))
+    assert chi2_contingency(table)[0] < chi2  # Yates would have lowered it
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_the_numpy_table_matches_crosstab(seed):
+    rng = np.random.default_rng(seed)
+    n = 200
+    x = pd.Series([f"x{v}" for v in rng.integers(0, 6, n)], dtype=object)
+    y = pd.Series(list(rng.choice([True, False, "maybe"], n)), dtype=object)
+    x[rng.random(n) < 0.15] = None
+    y[rng.random(n) < 0.15] = None
+    # A category that only appears where the other column is missing
+    lonely = int(np.flatnonzero(y.isna().to_numpy())[0])
+    x[lonely] = "only-here"
+    assert cramers_v(x, y) == pytest.approx(_reference_v(x, y), abs=1e-12)
+    assert cramers_v(y, x) == pytest.approx(_reference_v(x, y), abs=1e-12)
+
+
+def test_a_different_value_on_every_shared_row_gives_zero():
+    x = pd.Series([f"r{i}" for i in range(12)])
+    y = pd.Series(["a", "b"] * 6)
+    assert cramers_v(x, y) == 0.0
+
+
+def test_one_category_on_the_shared_rows_gives_zero():
+    # "b" exists, but only where y is missing
+    x = pd.Series(["a"] * 10 + ["b"] * 3)
+    y = pd.Series(["p", "q"] * 5 + [None] * 3)
+    assert cramers_v(x, y) == 0.0
+    df = pd.DataFrame({"x": x, "y": y})
+    assert _categorical(df)["cramers_v"]["x"]["y"] == 0.0

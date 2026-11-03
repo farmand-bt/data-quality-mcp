@@ -52,6 +52,7 @@ This avoids circular imports. It also lets tests build a fresh server with `crea
 The outlier, duplicate, correlation and recommendation logic and the cleaning handlers are ported from `llm-data-quality-analyzer` with the same methods, thresholds and rules, so both projects give the same answers on the same data. The ported test cases live in the `TestAnalyzerParity` classes. Every deviation, with its reason, is listed in the milestone specs:
 - [`planning/milestone-2.md`](../planning/milestone-2.md#deviations-from-the-analyzer) for profiling
 - [`planning/milestone-3.md`](../planning/milestone-3.md#deviations-from-the-analyzer) for cleaning
+- [`planning/milestone-3.5.md`](../planning/milestone-3.5.md#deviations-from-the-analyzer) for the profiling follow-ups and their amendments
 
 ## Errors
 
@@ -94,7 +95,7 @@ The analyzer's "+5 clean-column bonus" was dropped in Milestone 1, because it co
 - **Duplicates:**
   - exact duplicates: `exact_count` is how many rows deduplication would remove
   - near-duplicates: rows identical on all columns but one, excluding exact duplicates, skipped above 50 columns. They're reported but not scored. Each cell is hashed once, and a row's "all columns but one" key is the wrapping sum of its column hashes minus one term, so each column needs only one cheap uint64 pass. Hash matches are confirmed on the real values, so the result is exactly the analyzer's definition (a randomized test checks this). At the limits (500k rows × 50 columns), this takes about 1.6 s, compared with 21.6 s for the per-column full-row passes.
-- **Correlations:** Pearson over the first 50 numeric columns, and Cramér's V (`scipy` χ², no bias correction) over the first 15 categorical/boolean columns with at most 50 distinct values. A pair needs at least 10 rows with both values, otherwise it is `null` (two rows always give r = ±1). Pairs with |value| ≥ 0.9 are listed strongest first.
+- **Correlations:** Pearson over the first 50 numeric columns, and the bias-corrected Cramér's V (Bergsma 2013, from a `scipy` χ² without Yates' correction) over the first 15 categorical/boolean columns with at most 50 distinct values. The plain V reaches the 0.9 threshold between unrelated columns on sparse tables; the corrected V stays near 0 there, at the cost of flagging a many-to-one mapping (city → region) only once each level has several rows ([milestone-3.5.md](../planning/milestone-3.5.md), Amendment, 0.4.3). Each column is factorized once, and each pair's table is counted with numpy from the codes of its shared rows. A pair needs at least 10 rows with both values, otherwise it is `null` (two rows always give r = ±1). Pairs with |value| ≥ 0.9 are listed strongest first.
 
 ## Heuristics added in Milestone 3.5
 
@@ -116,7 +117,7 @@ Each one reports evidence, not a verdict, and was checked against the problems `
 - **ISO dates in a CSV** (`type_detector.py`): text that is all ISO 8601, in one timezone convention, isn't a type mismatch for CSV input, which has no date type. The report builders get the format from the loader's extension. XLSX text dates, other formats and mixed formats stay mismatches.
 - **Not scored:** the score formula is unchanged. These findings describe values that are already scored (missing, outliers) or are judgement calls (repeated IDs).
 - **Speed:** at 500,000 × 10, `profile_dataset` takes about 3.8 s (3.0 s before Milestone 3.5). Type detection parses each distinct value once, and the deduplicated-row mask is computed once per report (in the cleaner, only for a sentinel step, the one step that reads it).
-- **Ruling out dates:** a text column stops being parsed for dates once more than a fifth of its rows hold values that failed, because it can no longer reach the 80% threshold. Values are parsed in chunks of 1,000. A value that fails in a chunk also fails in the whole column (pandas 3 picks one time resolution per series, so a nanosecond timestamp puts dates before 1677 out of range for all of them), and a column that isn't ruled out is parsed whole, so the result is the same as before. On a 50,000 × 100 file with 15 free-text columns, `profile_dataset` takes about 10 s instead of 20 s.
+- **Ruling out dates:** a text column stops being parsed for dates once more than a fifth of its rows hold values that failed, because it can no longer reach the 80% threshold. Values are parsed in chunks of 1,000. A value that fails in a chunk also fails in the whole column (pandas 3 picks one time resolution per series, so a nanosecond timestamp puts dates before 1677 out of range for all of them), and a column that isn't ruled out is parsed whole, so the result is the same as before. On a 50,000 × 100 file with 15 free-text columns, `profile_dataset` takes about 10 s instead of 20 s, and about 9 s since the correlations section counts its tables with numpy (0.4 s for that section, from 2.0 s).
 
 ## Input
 

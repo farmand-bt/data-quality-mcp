@@ -98,18 +98,19 @@ def profile_dataset(
     - missing_related_to: observed columns whose values go with this
       column's missing values, strongest first, each {column, method, value}.
       method is point_biserial (value = correlation with that numeric column;
-      positive means more missing where it is higher), cramers_v (association
-      with that category column, 0 to 1) or missing_together (the two columns
-      go missing in the same rows). Only strong, significant associations are
-      listed. This is evidence, not a verdict: if gaps depend on another
-      column, a mean or median fill biases the column. [] means tested and
-      nothing found, which is consistent with random gaps but doesn't prove
-      them. null means not tested: no missing values, too few missing or
+      positive means more missing where it is higher), cramers_v
+      (bias-corrected association with that category column, 0 to 1) or
+      missing_together (the two columns go missing in the same rows). Only
+      strong, significant associations are listed. This is evidence, not a
+      verdict: if gaps depend on another column, a mean or median fill
+      biases the column. [] means tested and nothing found, which is
+      consistent with random gaps but doesn't prove them. null means not
+      tested: no missing values, too few missing or
       present rows, or past the first 50 columns with missing values.
     - duplicates: see find_duplicates (includes key_columns, repeated IDs:
       quote the IDs from sample_values, not sample_indices, which are row
       positions).
-      correlations: see analyze_correlations.
+    - correlations: see analyze_correlations.
     - generated_at: UTC timestamp.
 
     Row indices anywhere in the report are 0-based data-row positions (header
@@ -226,8 +227,9 @@ def analyze_correlations(
     - pearson: full matrix over numeric/mixed columns (-1 to 1; null where
       undefined, e.g. a constant column, or where fewer than 10 rows have both
       values). At most the first 50 numeric columns.
-    - cramers_v: association between categorical/boolean columns (0 to 1),
-      upper triangle only; null where fewer than 10 rows have both values. At
+    - cramers_v: bias-corrected Cramér's V between categorical/boolean
+      columns (0 to 1; near 0 for unrelated columns, even on few rows), upper
+      triangle only; null where fewer than 10 rows have both values. At
       most the first 15 such columns with no more than 50 distinct values
       each; others are skipped.
     - high_correlation_pairs: pairs with |value| >= 0.9, strongest first, each

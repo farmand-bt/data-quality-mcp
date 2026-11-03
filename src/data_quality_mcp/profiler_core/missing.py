@@ -15,6 +15,7 @@ from scipy.stats import chi2_contingency
 from scipy.stats import t as t_distribution
 
 from data_quality_mcp import config
+from data_quality_mcp.profiler_core.correlations import corrected_cramers_v
 from data_quality_mcp.profiler_core.schema import MissingAssociation
 
 _NUMERIC_TYPES = ("numeric", "mixed")
@@ -61,17 +62,6 @@ def _pearson_p(r: np.ndarray, n: np.ndarray) -> np.ndarray:
         dof = n - 2
         t = np.abs(r) * np.sqrt(dof / np.maximum(1.0 - r**2, 0.0))
         return np.where(np.abs(r) >= 1.0, 0.0, 2.0 * t_distribution.sf(t, dof))
-
-
-def corrected_cramers_v(chi2: float, n: int, shape: tuple[int, int]) -> float:
-    """Bias-corrected Cramér's V (Bergsma 2013). The plain V of the correlations
-    section reaches 0.3 by chance on sparse tables (D1's calibration)."""
-    rows, cols = shape
-    phi2 = max(0.0, chi2 / n - (rows - 1) * (cols - 1) / (n - 1))
-    rows_c = rows - (rows - 1) ** 2 / (n - 1)
-    cols_c = cols - (cols - 1) ** 2 / (n - 1)
-    denominator = min(rows_c - 1, cols_c - 1)
-    return float(np.sqrt(phi2 / denominator)) if denominator > 0 else 0.0
 
 
 def _point_biserial(
