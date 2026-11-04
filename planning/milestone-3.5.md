@@ -1,6 +1,6 @@
 # Milestone 3.5: Profiling Follow-ups
 
-> **Status: complete, including the first Amendment (0.4.1). The second Amendment (0.4.3) is proposed.** The spec was approved in #13 and implemented on `feat/milestone-3.5`; the first Amendment was approved in #18 and implemented on `fix/key-sample-values`. See **As built** for figures and small differences. The **Amendments** at the end add the conflicting key values to `key_columns` (0.4.1) and switch the correlations section to the bias-corrected Cramér's V (0.4.3).
+> **Status: complete, including both Amendments (0.4.1 and 0.4.3).** The spec was approved in #13 and implemented on `feat/milestone-3.5`; the first Amendment was approved in #18 and implemented on `fix/key-sample-values`; the second was approved in #21 and implemented on `fix/corrected-cramers-v`. See **As built** for figures and small differences. The **Amendments** at the end add the conflicting key values to `key_columns` (0.4.1) and switch the correlations section to the bias-corrected Cramér's V (0.4.3).
 > Shared context (architecture, report schema, design decisions) is in [project-overview.md](project-overview.md). Where this spec changes the report schema (see **Schema changes**, and the Amendment's own **Schema changes**), **this spec wins** until the implementation PR updates the overview. The previous milestone is [milestone-3.md](milestone-3.md). Its D9 deferred these items to "a separate short spec after M3". The milestone sits between M3 and M4, so M4 (remote deployment) and M5 keep their numbers.
 
 **Goal:** Make the report say more about *why* data is dirty, not only *how much*. It adds four things:
@@ -416,3 +416,29 @@ None. `CorrelationInfo.cramers_v` keeps its type (`dict[str, dict[str, float | N
 **Analyzer:** port it back after the merge, so the two stay consistent.
 - `profiler/correlations.py` `_cramers_v` gets the same formula and the numpy table from shared-row codes. The analyzer's `profiler/missing.py` already has `corrected_cramers_v`. Its correlations caption describes V without the formula, so it stays.
 - After both this implementation and #20 merge, the same port-back PR carries #20's date speed-up for `profiler/type_detector.py`. The analyzer parses every value, without the distinct-value step this repo has, so that step is ported with it.
+
+### As built (0.4.3)
+
+- **Fixture:** `cramers_v` is `{"neighborhood": {"garage": 0.0292}, "garage": {}}`. Every other figure is unchanged (score 77, `school_rating` → `age_years` 0.663, the sentinels and `key_columns`).
+- **Code:**
+  - `corrected_cramers_v` is in `correlations.py`, and `missing.py` imports it.
+  - `cramers_v(x, y)` keeps its signature. It factorizes both series and calls `_cramers_v_codes`.
+  - `compute_correlations` factorizes each categorical column once and passes the codes to `_cramers_v_codes` for every pair. That function keeps the shared rows and renumbers the codes to the categories that occur there, so the table has no empty row or column, as with `crosstab`. The shared-row count for D5's minimum comes from the same codes.
+- **Speed:** at 50,000 × 100 (15 categorical columns, 105 pairs), the correlations section takes 0.4 s instead of 2.0 s, and `profile_dataset` 8.8 s instead of 10.3 s. At 500,000 × 10 it is unchanged (about 4 s).
+- **Small difference from the tasks:** each column is factorized once per report rather than once per pair. That wasn't in the task list. Without it, factorizing strings for every pair took most of the numpy version's time.
+- **Tests:** 9 new test functions in `tests/test_correlations.py` (18 cases with the parametrized ones):
+  - the false high pair before the change
+  - one-to-one and 2 × 2
+  - the 10 → 2 trade-off at 20 and 100 rows
+  - the fixture
+  - no Yates
+  - the numpy table against `crosstab`, including a category that appears only where the other column is missing
+  - k = n
+  - one category on the shared rows
+
+  - label alignment, and no shared rows
+
+  `test_cramers_v_needs_ten_shared_rows` now uses a boolean pair and expects 1.0 and a high pair at 10 shared rows. The `crosstab` comparison uses real bools and each kind of missing value (None, NaN, `pd.NA`, NaT).
+- **`cramers_v(x, y)`** aligns the two series by index label first, as `pd.crosstab` did. `compute_correlations` passes positional codes from one frame, so it needs no alignment.
+- **Version:** 0.4.3.
+

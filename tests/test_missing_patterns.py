@@ -5,10 +5,8 @@ import pandas as pd
 import pytest
 from scipy.stats import pearsonr
 
-from data_quality_mcp.profiler_core.missing import (
-    corrected_cramers_v,
-    missing_associations,
-)
+from data_quality_mcp.profiler_core.correlations import corrected_cramers_v
+from data_quality_mcp.profiler_core.missing import missing_associations
 from data_quality_mcp.profiler_core.report import generate_report, prepare_frame
 from data_quality_mcp.profiler_core.type_detector import detect_types
 

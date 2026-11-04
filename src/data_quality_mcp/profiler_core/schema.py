@@ -132,7 +132,8 @@ class HighCorrelationPair(TypedDict):
 
 
 class CorrelationInfo(TypedDict):
-    """Pearson (numeric) and Cramér's V (categorical) associations."""
+    """Pearson (numeric) and bias-corrected Cramér's V (categorical)
+    associations."""
 
     pearson: dict[str, dict[str, float | None]]
     cramers_v: dict[str, dict[str, float | None]]  # None: too few shared rows
