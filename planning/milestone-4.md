@@ -108,6 +108,7 @@ Over HTTP, a `file_path` would name a file on the **server's** disk, not the cal
     - `ctx` is `None`: a direct Python call, as in the unit tests, which is local by nature. `file_path` is allowed.
     - `ctx` is present, so the call came through a server: the setting must come from the server's options. If the lifespan context is missing, or isn't the options object, the tool treats `file_path` as **not** allowed. A mis-wired server or an SDK change can then only break local file access, which a stdio test catches at once. It can never open it over HTTP.
     - Tests: an app whose lifespan yields nothing, or something else, rejects `file_path`. The stdio app allows it.
+    - **`ctx=None` must never come from a server.** If an SDK change stopped injecting `ctx`, every server call would look like a direct call and allow `file_path` again. The D7 tests therefore send `file_path` through real HTTP requests to the HTTP app, not through direct calls, and expect the D3 error from all 5 tools. They fail the moment `ctx` stops arriving, as does the CI smoke test.
   - **Why not a mutable module setting:** it would let one process's tests leak into another's, and it hides which server a tool belongs to.
   - **Checked on mcp 2.3.0** with a probe server (`streamable_http_app(stateless_http=True, json_response=True)` and Starlette's `TestClient`):
     - the lifespan's value reached the tool on every stateless request, and the lifespan ran once, not per request
@@ -141,7 +142,7 @@ Over HTTP, a `file_path` would name a file on the **server's** disk, not the cal
   - **Validation:** each must parse as a positive, finite number (an integer for the row count). `inf`, `nan`, `0`, a negative number and text are invalid.
   - **How an invalid value surfaces:** raising at import would show a bare traceback, before `main()` runs. So instead:
     - `config.py` keeps the default for an invalid variable, and records the problem in `CONFIG_ERRORS`, a list of messages naming the variable and the value.
-    - `server.main()` checks that list before anything else, on both transports. If it isn't empty, it prints each message to stderr as `data-quality-mcp: invalid DATA_QUALITY_MCP_MAX_ROWS='abc': expected a positive whole number`, and exits with status 2, without serving.
+    - `server.main()` checks that list before anything else, on both transports. If it isn't empty, it logs each message to stderr through `logging` (never `print()`, per CLAUDE.md) as `data-quality-mcp: invalid DATA_QUALITY_MCP_MAX_ROWS='abc': expected a positive whole number`, and exits with status 2, without serving.
     - Python code that imports the package directly gets the defaults, and the list says why.
   - **Effective overrides are logged at startup:** each variable that is set, and its value (none of them is a secret). So a stale variable left in a Claude Desktop config shows up in the log, rather than silently changing a limit.
   - **Tests:** set the variable, reload `config` with `importlib.reload`, and check `CONFIG_ERRORS` and `main()`'s exit and message. Keyword defaults in core modules are bound when those modules are defined, so a test of the overridden value itself reloads them too. Or it runs the server in a subprocess, which is how the CI smoke test checks it.
@@ -202,6 +203,7 @@ DNS rebinding lets a web page in the user's browser reach a server on `localhost
 - **In-process tests in the normal test matrix** (Ubuntu × Python 3.10–3.14, Windows × 3.10 and 3.14). They use Starlette's `TestClient` as a context manager (`with TestClient(app) as client:`), which runs the app's lifespan, so they need no Docker and count toward coverage:
   - **Auth:** 401 for a missing token, the wrong scheme, a wrong token or a non-ASCII header; 200 for the right token; `/health` open; no token read from the URL.
   - **Logs:** no token in any log record, from the header or the query string; nothing on stdout.
+  - **Nothing on stdout:** startup errors, warnings and the per-request log all go to stderr; only `--help` writes to stdout.
   - **Startup refusals:** no token (unset, empty or whitespace) on `0.0.0.0` or `127.0.0.2`; a token that is too short or outside the RFC 6750 set; a limit variable that isn't a positive, finite number (`abc`, `0`, `-1`, `inf`, `nan`), which exits with status 2 and the D4 message, on stdio as well.
   - **`/health`:** the exact-match exemption, and its independence from the allowed-hosts list (D5).
   - **Body cap:** 413 above `MAX_HTTP_REQUEST_MB`, with a `Content-Length` and chunked.
