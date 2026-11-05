@@ -28,7 +28,7 @@ A live deployment and OAuth (which a claude.ai custom connector needs) are **not
 ## Guiding principle: fail closed, stay simple
 
 The server is single-tenant: one token, one operator, no per-user state.
-- **Fail closed:** every rule below refuses rather than guesses. The server won't start on a public interface without a token, and it rejects a `file_path` over HTTP. A limit it can't parse is a startup error.
+- **Fail closed:** every rule below refuses rather than guesses. The server won't start on a public interface without a token, and it rejects a `file_path` over HTTP. A limit it can't parse stops the server at startup, with a clear message (D4).
 - **Stdio doesn't change:** `data-quality-mcp` with no arguments behaves exactly as in 0.4.3, so Claude Desktop and every existing config keep working. The one accepted exception: a malformed `DATA_QUALITY_MCP_*` limit variable (D4) now stops startup on stdio too, where 0.4.3 ignored it. Unset variables change nothing.
 - **Analyzer parity:** nothing to port. Transport, auth and Docker are MCP-only, so this milestone has no **Deviations** table.
 
@@ -77,7 +77,8 @@ The server is single-tenant: one token, one operator, no per-user state.
   - The host isn't one of exactly `127.0.0.1`, `localhost` or `::1`, the same three strings for which the SDK turns on its DNS-rebinding protection (D5), and no token is set: **the server refuses to start**. The error says which variable to set. So `0.0.0.0` in Docker, or another loopback address such as `127.0.0.2`, can't run without a token, and so can't run without either protection.
   - On loopback without a token, it starts and logs a warning. Any local process can reach it, but no remote one can, and D5 blocks browser pages.
   - With a token, every host requires it.
-- **The check (`http_auth.py`):** a pure ASGI middleware around the whole app, except `GET /health`.
+- **The check (`http_auth.py`):** a pure ASGI middleware around the whole app.
+  - **The only exemption** is an exact match: method `GET` or `HEAD` (Starlette answers `HEAD` for a `GET` route), and a path equal to `/health`. A prefix match would be an auth bypass. So `/health/`, `/healthz`, `/health/x`, `/mcp/`, `OPTIONS /health` and `POST /health` all need the token. Tests pin each one.
   - It only checks `http` scopes. Other scopes, in particular `lifespan`, pass through unchanged: the SDK's app starts its session manager in its lifespan, and without that every request fails.
   - It reads `Authorization: Bearer <token>`: the scheme, case-insensitive, then one or more spaces, then the token. Whitespace around the whole value is ignored, as HTTP header parsing already does. Anything else after the token, such as `Bearer <token> extra`, is a 401. Tests cover a double space, a trailing space and trailing text.
   - It compares **bytes** with `hmac.compare_digest`: the header value as Starlette decodes it (latin-1), encoded back to latin-1, against the ASCII token. Comparing `str` values would raise `TypeError` on a non-ASCII header and give a 500 instead of a 401. A test sends one.
@@ -137,7 +138,13 @@ Over HTTP, a `file_path` would name a file on the **server's** disk, not the cal
   | `DATA_QUALITY_MCP_MAX_INLINE_OUTPUT_MB` | `MAX_INLINE_OUTPUT_MB` | 1 |
   | `DATA_QUALITY_MCP_MAX_HTTP_REQUEST_MB` | `MAX_HTTP_REQUEST_MB` (new) | 16 |
 
-  - **Validation:** each must parse as a positive, finite number (an integer for the row count). `inf`, `nan`, `0`, a negative number or text raises at import with a message naming the variable, so the server fails at startup rather than on the first call.
+  - **Validation:** each must parse as a positive, finite number (an integer for the row count). `inf`, `nan`, `0`, a negative number and text are invalid.
+  - **How an invalid value surfaces:** raising at import would show a bare traceback, before `main()` runs. So instead:
+    - `config.py` keeps the default for an invalid variable, and records the problem in `CONFIG_ERRORS`, a list of messages naming the variable and the value.
+    - `server.main()` checks that list before anything else, on both transports. If it isn't empty, it prints each message to stderr as `data-quality-mcp: invalid DATA_QUALITY_MCP_MAX_ROWS='abc': expected a positive whole number`, and exits with status 2, without serving.
+    - Python code that imports the package directly gets the defaults, and the list says why.
+  - **Effective overrides are logged at startup:** each variable that is set, and its value (none of them is a secret). So a stale variable left in a Claude Desktop config shows up in the log, rather than silently changing a limit.
+  - **Tests:** set the variable, reload `config` with `importlib.reload`, and check `CONFIG_ERRORS` and `main()`'s exit and message. Keyword defaults in core modules are bound when those modules are defined, so a test of the overridden value itself reloads them too. Or it runs the server in a subprocess, which is how the CI smoke test checks it.
   - **Scope:** they apply to both transports. They are read before any core module binds its keyword defaults, because those modules import `config` first.
   - **Why so few:** only these 5 are limits an operator would size to a container (D6). The XLSX expansion cap is among them because it, more than the file size, bounds memory: M3's D2 notes that shared strings at that cap can take several times their XML size. Thresholds stay code defaults, so a report's meaning doesn't depend on the deployment.
   - **Not overridable:** `ALLOW_FILE_PATH` (set per transport by D3) and `ALLOW_NETWORK_PATHS` (stays `False`).
@@ -150,6 +157,7 @@ DNS rebinding lets a web page in the user's browser reach a server on `localhost
   - With `DATA_QUALITY_MCP_ALLOWED_HOSTS` (a comma-separated list such as `mcp.example.com,mcp.example.com:443`), the SDK's `TransportSecuritySettings` is enabled with those hosts. A request with an `Origin` header is then rejected, which is right for non-browser clients.
   - Without it, the check is off. The required token already stops a browser page, which can't attach it.
   - The later deployment spec should set the variable for its public hostname.
+- **`/health` is outside the host check.** The SDK applies `TransportSecuritySettings` inside its MCP transport (`StreamableHTTPSessionManager`), so only `/mcp` is checked. Custom routes such as `/health` aren't. Docker's `HEALTHCHECK`, which calls `http://127.0.0.1:8000/health`, therefore keeps working when `DATA_QUALITY_MCP_ALLOWED_HOSTS` names only the public hostname. A test sets the variable and checks that `/health` from loopback still returns 200 while `/mcp` with the same `Host` is rejected. The CI smoke test runs a second container with the variable set.
 
 ### D6. Docker image
 
@@ -188,12 +196,14 @@ DNS rebinding lets a web page in the user's browser reach a server on `localhost
     - `profile_dataset` with a small inline CSV returns a report with a quality score.
     - `profile_dataset` with a `file_path` returns the D3 error.
     - The container's log doesn't contain the token.
+    - A second container started with `DATA_QUALITY_MCP_ALLOWED_HOSTS=example.com` still reports healthy.
   - The job has minimal `permissions:` and its action versions are pinned, as in every workflow.
 - **The ruleset:** the new job is a required check, so the owner adds `Docker image` to the `main protection` ruleset's required checks after the implementation PR's first run (CLAUDE.md).
 - **In-process tests in the normal test matrix** (Ubuntu × Python 3.10–3.14, Windows × 3.10 and 3.14). They use Starlette's `TestClient` as a context manager (`with TestClient(app) as client:`), which runs the app's lifespan, so they need no Docker and count toward coverage:
   - **Auth:** 401 for a missing token, the wrong scheme, a wrong token or a non-ASCII header; 200 for the right token; `/health` open; no token read from the URL.
   - **Logs:** no token in any log record, from the header or the query string; nothing on stdout.
-  - **Startup refusals:** no token (unset, empty or whitespace) on `0.0.0.0` or `127.0.0.2`; a token that is too short or outside the RFC 6750 set; a limit variable that isn't a positive, finite number (`abc`, `0`, `-1`, `inf`, `nan`).
+  - **Startup refusals:** no token (unset, empty or whitespace) on `0.0.0.0` or `127.0.0.2`; a token that is too short or outside the RFC 6750 set; a limit variable that isn't a positive, finite number (`abc`, `0`, `-1`, `inf`, `nan`), which exits with status 2 and the D4 message, on stdio as well.
+  - **`/health`:** the exact-match exemption, and its independence from the allowed-hosts list (D5).
   - **Body cap:** 413 above `MAX_HTTP_REQUEST_MB`, with a `Content-Length` and chunked.
   - **Host checks:** on loopback, a request with a foreign `Host` header is rejected, and `[::1]:8000` is accepted on `::1`. Elsewhere, the allowed-hosts list is applied.
   - **`file_path` over HTTP:** rejected by all 5 tools, while `inline_content` works. `clean_dataset` also rejects an `output_path` with inline input, with a file path, and with no input at all, before any filesystem call (a test spies on `check_output_path`). The instructions and the prompt are the HTTP variants.
