@@ -29,7 +29,7 @@ A live deployment and OAuth (which a claude.ai custom connector needs) are **not
 
 The server is single-tenant: one token, one operator, no per-user state.
 - **Fail closed:** every rule below refuses rather than guesses. The server won't start on a public interface without a token, and it rejects a `file_path` over HTTP. A limit it can't parse is a startup error.
-- **Stdio doesn't change:** `data-quality-mcp` with no arguments behaves exactly as in 0.4.3, so Claude Desktop and every existing config keep working.
+- **Stdio doesn't change:** `data-quality-mcp` with no arguments behaves exactly as in 0.4.3, so Claude Desktop and every existing config keep working. The one accepted exception: a malformed `DATA_QUALITY_MCP_*` limit variable (D4) now stops startup on stdio too, where 0.4.3 ignored it. Unset variables change nothing.
 - **Analyzer parity:** nothing to port. Transport, auth and Docker are MCP-only, so this milestone has no **Deviations** table.
 
 ## Decisions to confirm in review
@@ -61,7 +61,7 @@ The server is single-tenant: one token, one operator, no per-user state.
 - **Concurrency:** the SDK runs synchronous tools in worker threads (`anyio.to_thread`, at most 40 at a time by default), so a long profile doesn't block `/health` or other requests. Concurrent calls on large inputs each need their own memory, and M4 has no cap on that: the server is token-gated and single-tenant. The README's sizing note says so (D6).
 - **Logging:** stderr, as for stdio.
   - **Uvicorn's defaults don't do that:** its default `log_config` sends the access log to **stdout**, and its request line includes the query string. A client that put `?token=...` in the URL would get its token logged, even though the server never reads it.
-  - So `server.py` passes its own `log_config`, with every handler on stderr, and turns uvicorn's access log off (`access_log=False`). The middleware (D2) logs one line per request instead: method, path **without the query string**, and status.
+  - So `server.py` passes its own `log_config`, with every handler on stderr, and turns uvicorn's access log off (`access_log=False`). The middleware (D2) logs one line per request instead: method, path **without the query string**, and status. `GET /health` is logged at DEBUG only, so Docker's health check doesn't fill the log.
   - Request headers and bodies are never logged. The startup log names the transport, the address and whether auth is on, never the token.
   - A test sends a token in both the header and the query string and checks that neither appears in any log record.
 
@@ -70,14 +70,16 @@ The server is single-tenant: one token, one operator, no per-user state.
 - **The token:**
   - It comes from `DATA_QUALITY_MCP_TOKEN` in the environment.
   - A token is never accepted as a command-line argument, because process lists show arguments to other users.
-  - A token of fewer than 32 characters, or with a character outside printable ASCII, is a startup error. The README shows how to generate one: `python -c "import secrets; print(secrets.token_urlsafe(32))"` (43 characters).
+  - **Empty means unset:** an empty or whitespace-only value counts as no token. `.env.example` ships `DATA_QUALITY_MCP_TOKEN=`, which `docker --env-file` passes as an empty string, so loopback without a token keeps working (with the warning below).
+  - **Format:** at least 32 characters, from the RFC 6750 token set (letters, digits and `-._~+/`, optionally ending in `=`). So no spaces or other whitespace, and no non-ASCII characters. Anything else is a startup error. The README shows how to generate one: `python -c "import secrets; print(secrets.token_urlsafe(32))"` (43 characters, all in that set).
+  - **`.env` values are unquoted:** `docker --env-file` keeps quotes as part of the value, while `uv run --env-file` strips them, so a quoted token would differ between the two. `.env.example` says so, and a quote character fails the format check anyway.
 - **When it's required:**
   - The host isn't one of exactly `127.0.0.1`, `localhost` or `::1`, the same three strings for which the SDK turns on its DNS-rebinding protection (D5), and no token is set: **the server refuses to start**. The error says which variable to set. So `0.0.0.0` in Docker, or another loopback address such as `127.0.0.2`, can't run without a token, and so can't run without either protection.
   - On loopback without a token, it starts and logs a warning. Any local process can reach it, but no remote one can, and D5 blocks browser pages.
   - With a token, every host requires it.
 - **The check (`http_auth.py`):** a pure ASGI middleware around the whole app, except `GET /health`.
   - It only checks `http` scopes. Other scopes, in particular `lifespan`, pass through unchanged: the SDK's app starts its session manager in its lifespan, and without that every request fails.
-  - It reads `Authorization: Bearer <token>`. The scheme name is case-insensitive.
+  - It reads `Authorization: Bearer <token>`: the scheme, case-insensitive, then one or more spaces, then the token. Whitespace around the whole value is ignored, as HTTP header parsing already does. Anything else after the token, such as `Bearer <token> extra`, is a 401. Tests cover a double space, a trailing space and trailing text.
   - It compares **bytes** with `hmac.compare_digest`: the header value as Starlette decodes it (latin-1), encoded back to latin-1, against the ASCII token. Comparing `str` values would raise `TypeError` on a non-ASCII header and give a 500 instead of a 401. A test sends one.
   - A missing or wrong token gets `401`, with `WWW-Authenticate: Bearer` and a short JSON body. The body doesn't say which case it was.
   - A token in the URL (for example `?token=`) is never read.
@@ -100,7 +102,11 @@ Over HTTP, a `file_path` would name a file on the **server's** disk, not the cal
 - **The stdio allowed-root option that M3's D4 deferred to M4 is dropped.** Over stdio the server runs as the user, on the user's machine, and can already reach whatever the user can; M3 documents that trust model in the README. An allowed root there would mostly restrict the user's own agent. No-overwrite and the client's approval prompt for `clean_dataset` stay the guards against a steered `output_path`. If it is wanted later, it can share the HTTP allowed-root design above.
 - **Where it's enforced:**
   - **In the core:** `load_input` and `run_cleaning` gain `allow_file_path: bool = config.ALLOW_FILE_PATH`, with a default of `True`. The check runs before the network-path check, so no UNC lookup happens either.
-  - **How the tools learn the setting:** `create_server(*, allow_file_path=True)` gives the app a lifespan that yields the server's options. Each tool takes an optional `ctx: Context | None = None` parameter. The SDK finds it through `find_context_parameter`, which accepts `Optional[Context]`, and leaves it out of the input schema. The tool reads the setting from the request's lifespan context. A direct Python call without a context, as in the unit tests, behaves as a local call, which is what such a call is.
+  - **How the tools learn the setting:** `create_server(*, allow_file_path=True)` gives the app a lifespan that yields the server's options, on both transports. Each tool takes an optional `ctx: Context | None = None` parameter. The SDK finds it through `find_context_parameter`, which accepts `Optional[Context]`, and leaves it out of the input schema. The tool reads the setting from the request's lifespan context.
+  - **Fail closed** (CI review): there are only two cases.
+    - `ctx` is `None`: a direct Python call, as in the unit tests, which is local by nature. `file_path` is allowed.
+    - `ctx` is present, so the call came through a server: the setting must come from the server's options. If the lifespan context is missing, or isn't the options object, the tool treats `file_path` as **not** allowed. A mis-wired server or an SDK change can then only break local file access, which a stdio test catches at once. It can never open it over HTTP.
+    - Tests: an app whose lifespan yields nothing, or something else, rejects `file_path`. The stdio app allows it.
   - **Why not a mutable module setting:** it would let one process's tests leak into another's, and it hides which server a tool belongs to.
   - **Checked on mcp 2.3.0** with a probe server (`streamable_http_app(stateless_http=True, json_response=True)` and Starlette's `TestClient`):
     - the lifespan's value reached the tool on every stateless request, and the lifespan ran once, not per request
@@ -119,7 +125,8 @@ Over HTTP, a `file_path` would name a file on the **server's** disk, not the cal
 - **Request body:**
   - The SDK caps a request body at 4 MiB by default (`DEFAULT_MAX_REQUEST_BODY_SIZE`), so inline data over HTTP would fail well below the loader's 50 MB.
   - M4 sets `max_request_body_size` from `MAX_HTTP_REQUEST_MB` (default **16**). That is enough for any CSV a model would paste, and for programmatic clients sending a few MB.
-  - A larger body gets HTTP `413` from the SDK before any tool runs. The README explains this, since the agent sees a transport error rather than a tool error.
+  - A larger body gets HTTP `413` from the SDK's `RequestBodyLimitMiddleware` before any tool runs. It rejects a declared `Content-Length` above the cap at once. For a chunked body without one, it counts the bytes as they arrive and stops at the cap. The 413 test covers both cases.
+  - The README explains the 413, since the agent sees a transport error rather than a tool error. It also gives the effective sizes: base64 adds about a third, so 16 MB carries an XLSX of about 12 MB. A CSV can use almost the whole 16 MB, minus the JSON-RPC envelope and any escaping.
 - **Environment overrides,** read once in `config.py` at import:
 
   | Variable | Overrides | Default |
@@ -138,7 +145,7 @@ Over HTTP, a `file_path` would name a file on the **server's** disk, not the cal
 ### D5. Host and Origin checks
 
 DNS rebinding lets a web page in the user's browser reach a server on `localhost`.
-- **On loopback:** the SDK enables its protection automatically when `host` is `127.0.0.1`, `localhost` or `::1`, allowing only loopback `Host` and `Origin` values. M4 passes `host` through, so that applies, and a test pins it. In the same probe, a request with `Host: evil.example:8000` got `421 Misdirected Request`.
+- **On loopback:** the SDK enables its protection automatically when `host` is `127.0.0.1`, `localhost` or `::1`, allowing only loopback `Host` and `Origin` values. M4 passes `host` through, so that applies, and a test pins it. In the same probe, a request with `Host: evil.example:8000` got `421 Misdirected Request`. For IPv6 the SDK's list holds the bracketed forms (`[::1]:*` for `Host`, `http://[::1]:*` for `Origin`), so `Host: [::1]:8000` is accepted. A test pins that too.
 - **Elsewhere** (`0.0.0.0` in Docker):
   - With `DATA_QUALITY_MCP_ALLOWED_HOSTS` (a comma-separated list such as `mcp.example.com,mcp.example.com:443`), the SDK's `TransportSecuritySettings` is enabled with those hosts. A request with an `Origin` header is then rejected, which is right for non-browser clients.
   - Without it, the check is off. The required token already stops a browser page, which can't attach it.
@@ -186,9 +193,9 @@ DNS rebinding lets a web page in the user's browser reach a server on `localhost
 - **In-process tests in the normal test matrix** (Ubuntu × Python 3.10–3.14, Windows × 3.10 and 3.14). They use Starlette's `TestClient` as a context manager (`with TestClient(app) as client:`), which runs the app's lifespan, so they need no Docker and count toward coverage:
   - **Auth:** 401 for a missing token, the wrong scheme, a wrong token or a non-ASCII header; 200 for the right token; `/health` open; no token read from the URL.
   - **Logs:** no token in any log record, from the header or the query string; nothing on stdout.
-  - **Startup refusals:** no token on `0.0.0.0` or `127.0.0.2`; a token that is too short or not printable ASCII; a limit variable that isn't a positive, finite number (`abc`, `0`, `-1`, `inf`, `nan`).
-  - **Body cap:** 413 above `MAX_HTTP_REQUEST_MB`.
-  - **Host checks:** on loopback, a request with a foreign `Host` header is rejected. Elsewhere, the allowed-hosts list is applied.
+  - **Startup refusals:** no token (unset, empty or whitespace) on `0.0.0.0` or `127.0.0.2`; a token that is too short or outside the RFC 6750 set; a limit variable that isn't a positive, finite number (`abc`, `0`, `-1`, `inf`, `nan`).
+  - **Body cap:** 413 above `MAX_HTTP_REQUEST_MB`, with a `Content-Length` and chunked.
+  - **Host checks:** on loopback, a request with a foreign `Host` header is rejected, and `[::1]:8000` is accepted on `::1`. Elsewhere, the allowed-hosts list is applied.
   - **`file_path` over HTTP:** rejected by all 5 tools, while `inline_content` works. `clean_dataset` also rejects an `output_path` with inline input, with a file path, and with no input at all, before any filesystem call (a test spies on `check_output_path`). The instructions and the prompt are the HTTP variants.
   - **Stdio:** `create_server()` with no arguments is unchanged. The tool schemas don't include `ctx`. The existing tests pass unmodified.
 
