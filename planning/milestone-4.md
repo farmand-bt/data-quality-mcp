@@ -93,7 +93,10 @@ Over HTTP, a `file_path` would name a file on the **server's** disk, not the cal
   - **In the core:** `load_input` and `run_cleaning` gain `allow_file_path: bool = config.ALLOW_FILE_PATH`, with a default of `True`. The check runs before the network-path check, so no UNC lookup happens either.
   - **How the tools learn the setting:** `create_server(*, allow_file_path=True)` gives the app a lifespan that yields the server's options. Each tool takes an optional `ctx: Context | None = None` parameter. The SDK finds it through `find_context_parameter`, which accepts `Optional[Context]`, and leaves it out of the input schema. The tool reads the setting from the request's lifespan context. A direct Python call without a context, as in the unit tests, behaves as a local call, which is what such a call is.
   - **Why not a mutable module setting:** it would let one process's tests leak into another's, and it hides which server a tool belongs to.
-  - **Plan mode checks** that the lifespan context reaches stateless HTTP requests in mcp 2.3.0. If it doesn't, the fallback is `register(app, *, allow_file_path=True)`, with thin wrappers that keep each tool's signature. That would change the registration pattern, so it would need an Amendment.
+  - **Checked on mcp 2.3.0** with a probe server (`streamable_http_app(stateless_http=True, json_response=True)` and Starlette's `TestClient`):
+    - the lifespan's value reached the tool on every stateless request, and the lifespan ran once, not per request
+    - the tool's input schema listed only its own argument, without `ctx`
+    - a direct call without a context received `None`
 - **What a remote agent is told:** the server instructions are chosen by transport. Over HTTP they say to send the data inline and don't mention file paths.
   - The tools' argument descriptions stay the same for both transports. The `file_path` description already says it means "the machine running this server".
   - The `review_data_quality` prompt takes `filename` over HTTP instead of `file_path`. Its text asks the agent to read that file itself and send its contents inline.
@@ -121,7 +124,7 @@ Over HTTP, a `file_path` would name a file on the **server's** disk, not the cal
 ### D5. Host and Origin checks
 
 DNS rebinding lets a web page in the user's browser reach a server on `localhost`.
-- **On loopback:** the SDK enables its protection automatically when `host` is loopback, allowing only loopback `Host` and `Origin` values. M4 passes `host` through, so that applies, and a test pins it.
+- **On loopback:** the SDK enables its protection automatically when `host` is `127.0.0.1`, `localhost` or `::1`, allowing only loopback `Host` and `Origin` values. M4 passes `host` through, so that applies, and a test pins it. In the same probe, a request with `Host: evil.example:8000` got `421 Misdirected Request`.
 - **Elsewhere** (`0.0.0.0` in Docker):
   - With `DATA_QUALITY_MCP_ALLOWED_HOSTS` (a comma-separated list such as `mcp.example.com,mcp.example.com:443`), the SDK's `TransportSecuritySettings` is enabled with those hosts. A request with an `Origin` header is then rejected, which is right for non-browser clients.
   - Without it, the check is off. The required token already stops a browser page, which can't attach it.
