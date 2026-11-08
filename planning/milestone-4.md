@@ -307,7 +307,7 @@ Merging this spec also approves these `CLAUDE.md` changes, made in the implement
 - **`test_architecture.py`:** enforces the new import lists, and a test checks that its matcher catches forbidden imports.
 
 **Tests:**
-- **Count:** 762 in all, 605 at 0.4.3, on Python 3.12 with pandas 3 and on 3.10 with pandas 2.3.3. Coverage is 98%.
+- **Count:** 763 in all, 605 at 0.4.3, on Python 3.12 with pandas 3 and on 3.10 with pandas 2.3.3. Coverage is 98%.
 - **New test files:** `test_http.py`, which sends real HTTP requests through the whole app with Starlette's `TestClient`, and `test_server_main.py`, which covers startup and the overrides.
 - **Stdio:** the existing tool tests pass unmodified.
 
@@ -348,6 +348,7 @@ Merging this spec also approves these `CLAUDE.md` changes, made in the implement
 **Differences from the spec:**
 - **Stated limits in the tool descriptions:** they are formatted from `config`: file size and rows in the input help, and the inline output limit in `clean_dataset`. An override (D4) would otherwise leave the agent reading wrong numbers. This was a follow-up candidate from 0.4.3, done here for the overridable limits only. The other hardcoded figures (50 columns, 0.9 and so on) stay as they are.
 - **Plain one-line logs:** `MCPServer` installs a rich log handler on the root logger when it is created, which made `main()`'s `basicConfig` a no-op and wrapped one record over several lines. `main()` now swaps that handler for a plain stderr one, on both transports, so a request is one line, as D1 intends. Other handlers, such as pytest's, are left alone.
+- **Order in `main()`:** the command line is parsed before `CONFIG_ERRORS` is checked (CI review), so `--help` still works with a bad variable. D4 put the check first.
 - **Exit status:** every startup refusal exits with status 2: a bad limit, a token problem, or a `--no-auth` misuse (an argparse usage error, which uses 2 too).
 - **`DATA_QUALITY_MCP_ALLOWED_HOSTS` on loopback:** when it is set, it replaces the SDK's loopback default there too, rather than being ignored.
 - **Escaping:** the logged method is escaped with `%r` as well as the path.

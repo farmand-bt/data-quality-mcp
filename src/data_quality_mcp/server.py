@@ -223,6 +223,7 @@ def _configure_logging() -> None:
 def main(argv: Sequence[str] | None = None) -> None:
     """Console-script entry point: serve over stdio, or over HTTP."""
     _configure_logging()
+    args = _parse_args(argv)  # first, so --help works even with a bad variable
     if config.CONFIG_ERRORS:
         for message in config.CONFIG_ERRORS:
             logger.error("data-quality-mcp: %s", message)
@@ -230,7 +231,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     for variable, value in config.CONFIG_OVERRIDES.items():
         logger.info("Limit override: %s=%s", variable, value)
 
-    args = _parse_args(argv)
     if args.transport == "stdio":
         app.run()
         return

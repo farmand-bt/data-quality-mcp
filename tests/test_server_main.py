@@ -253,6 +253,14 @@ def test_main_exits_on_an_invalid_limit(
     assert served == {}
 
 
+def test_help_works_with_an_invalid_limit(reload_config, capsys):
+    reload_config(MAX_ROWS="abc")
+    with pytest.raises(SystemExit) as exc:
+        server.main(["--help"])
+    assert exc.value.code == 0
+    assert "--transport" in capsys.readouterr().out
+
+
 def test_valid_overrides_are_applied_and_logged(reload_config, caplog, served):
     caplog.set_level(logging.INFO)
     reload_config(MAX_FILE_SIZE_MB=" 20 ", MAX_HTTP_REQUEST_MB="0.5", MAX_ROWS="")

@@ -23,7 +23,8 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-TOKEN_ENV = "DATA_QUALITY_MCP_TOKEN"
+# The variable's name, not a secret (Bandit B105 matches names like *TOKEN*)
+TOKEN_ENV = "DATA_QUALITY_MCP_TOKEN"  # nosec B105
 # The SDK enables its DNS-rebinding protection for exactly these hosts (D5)
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 MIN_TOKEN_LENGTH = 32
