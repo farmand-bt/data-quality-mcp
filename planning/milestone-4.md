@@ -307,7 +307,7 @@ Merging this spec also approves these `CLAUDE.md` changes, made in the implement
 - **`test_architecture.py`:** enforces the new import lists, and a test checks that its matcher catches forbidden imports.
 
 **Tests:**
-- **Count:** 749 in all, 605 at 0.4.3, on Python 3.12 with pandas 3 and on 3.10 with pandas 2.3.3. Coverage is 98%.
+- **Count:** 762 in all, 605 at 0.4.3, on Python 3.12 with pandas 3 and on 3.10 with pandas 2.3.3. Coverage is 98%.
 - **New test files:** `test_http.py`, which sends real HTTP requests through the whole app with Starlette's `TestClient`, and `test_server_main.py`, which covers startup and the overrides.
 - **Stdio:** the existing tool tests pass unmodified.
 
@@ -323,6 +323,7 @@ Merging this spec also approves these `CLAUDE.md` changes, made in the implement
   - it runs as uid 10001
   - without a token it exits with status 2 and an empty stdout
   - with `DATA_QUALITY_MCP_ALLOWED_HOSTS=example.com` it is still healthy
+  - **MCP Inspector 2.12.0:** `--cli` lists the 5 tools, both with `examples/inspector_config.json` (`"type": "http"`) and with the README's `--transport http --server-url ... --header ...` flags; a wrong token exits with status 3 (auth required)
   - `docker --env-file` drops a trailing `\r` itself; the server strips the token anyway, for `uv run --env-file`
 
 **Sizing:** peak memory of the server process (VmHWM), in the image, one `profile_dataset` call per fresh container:
@@ -350,6 +351,10 @@ Merging this spec also approves these `CLAUDE.md` changes, made in the implement
 - **Exit status:** every startup refusal exits with status 2: a bad limit, a token problem, or a `--no-auth` misuse (an argparse usage error, which uses 2 too).
 - **`DATA_QUALITY_MCP_ALLOWED_HOSTS` on loopback:** when it is set, it replaces the SDK's loopback default there too, rather than being ignored.
 - **Escaping:** the logged method is escaped with `%r` as well as the path.
+- **WebSockets are refused** (pre-PR review): the middleware passes only `lifespan` and `http` scopes to the app, and closes a WebSocket with code 1008, with or without a token. Nothing serves WebSockets today, so this only keeps a later SDK route from getting around the token.
+- **Validation edge cases** (pre-PR review): a whole number too large for a float (e.g. 400 digits) is an invalid limit rather than an import-time `OverflowError`, and the request cap is at least one byte, since the SDK rejects 0.
+- **Remote errors in the tool descriptions:** each tool's Errors part, and the input help, say that a remote server refuses `file_path`, so send `inline_content`. The argument descriptions are unchanged (D3).
+- **Limits as the agent reads them:** `config.format_limit` writes "500,000" or "0.5", never "1e+06".
 - **The CI job also runs a third container without a token,** and checks that it exits with status 2, names the variable and writes nothing to stdout.
 - **`.dockerignore`** also leaves out `docs/`, `examples/`, `scripts/` and `.github/`, which the image doesn't need.
 - **The lock:** the local `uv` (0.11.28) would have rewritten `uv.lock` in an older format (revision 3), so the lock was regenerated with a current `uv` (0.13.7, through `uvx`). The diff is only the version and the two new direct dependencies.

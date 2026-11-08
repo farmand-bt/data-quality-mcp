@@ -80,7 +80,7 @@ data-quality-mcp/
 │   └── workflows/
 │       ├── commitlint.yml           # PR title follows Conventional Commits
 │       ├── lint.yml                 # ruff check + ruff format --check
-│       ├── test.yml                 # pytest matrix (Ubuntu + Windows × Python 3.10–3.13)
+│       ├── test.yml                 # pytest matrix (Ubuntu × Python 3.10–3.14, Windows × 3.10 and 3.14)
 │       ├── build.yml                # wheel/sdist build + twine check; Docker image build + HTTP smoke test (M4)
 │       ├── security.yml             # pip-audit, Bandit, CodeQL
 │       └── claude-review.yml        # Claude Code Review on PRs
@@ -183,7 +183,7 @@ This project is built across 5 milestones, plus a short Milestone 3.5 — delibe
 **Important for scaffolding decisions made now:**
 - **The core/tools boundary is the single most important structural decision in this project.** `profiler_core/`, `cleaner_core/`, and `config.py` must never import anything from `mcp`, nor (since Milestone 4) the web stack. They should be plain, testable Python that could be reused outside an MCP context. Only `tools/` and `server.py` touch the MCP SDK — this keeps the core logic transport-agnostic ahead of Milestone 4, when a second transport (HTTP) is added alongside stdio.
 - **Registration pattern (avoids circular imports and keeps the boundary clean):** each `tools/*.py` module defines plain functions plus a `register(app: MCPServer) -> None` function that registers them. `server.py` creates the app, calls each module's `register(app)`, and runs it. Tool modules never import a global app object from `server.py`.
-- **The boundary is enforced by a test, not by review alone:** `tests/test_architecture.py` walks `profiler_core/` and `cleaner_core/` (and `config.py`) and fails on any `import mcp` / `from mcp`.
+- **The boundary is enforced by a test, not by review alone:** `tests/test_architecture.py` walks `profiler_core/` and `cleaner_core/` (and `config.py`) and fails on any import of the MCP SDK (`mcp`, `mcp_types`) or, since Milestone 4, the web stack. It also checks that `http_auth.py` never imports the SDK.
 - `profiler_core/loader.py` was designed from Milestone 1 to accept either a `file_path` or `inline_content`, so the tools could gain inline input in Milestone 3 without a redesign. Inline CSV is plain text and inline XLSX is base64 (see Dual Input Mode).
 - Every tool's docstring and type hints matter more here than in a typical project — the SDK's `MCPServer` derives the schema and description an agent sees directly from them. Write them as if a language model, not a human, is the only reader.
 

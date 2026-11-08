@@ -96,8 +96,9 @@ def clean_dataset(
     outliers_treated, null where not applicable).
 
     Errors say what to fix: an unknown column, a strategy that doesn't fit
-    the column, conflicting steps, an existing output_path, or steps that
-    would remove every row.
+    the column, conflicting steps, an existing output_path, steps that
+    would remove every row, or a remote server that can't read or write
+    files (it refuses file_path and output_path: send inline_content).
     """
     try:
         return run_cleaning(
@@ -114,8 +115,8 @@ def clean_dataset(
 
 # The inline limit can be overridden (config, D4), so the agent reads the real one
 clean_dataset.__doc__ = clean_dataset.__doc__.replace(
-    "{inline_mb}", f"{config.MAX_INLINE_OUTPUT_MB:g}"
-).replace("{xlsx_mb}", f"{config.MAX_INLINE_OUTPUT_MB * 0.75:g}")
+    "{inline_mb}", config.format_limit(config.MAX_INLINE_OUTPUT_MB)
+).replace("{xlsx_mb}", config.format_limit(config.MAX_INLINE_OUTPUT_MB * 0.75))
 
 
 def register(app: MCPServer) -> None:

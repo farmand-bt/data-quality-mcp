@@ -32,14 +32,21 @@ def _env_limit(name: str, default: int, *, integer: bool = False) -> int | float
         return default
     try:
         value = int(raw) if integer else float(raw)
-    except ValueError:
-        value = None
-    if value is None or not math.isfinite(value) or value <= 0:
+        # isfinite raises OverflowError for an int too large for a float
+        valid = math.isfinite(value) and value > 0
+    except (ValueError, OverflowError):
+        valid = False
+    if not valid:
         expected = "a positive whole number" if integer else "a positive number"
         CONFIG_ERRORS.append(f"invalid {variable}={raw!r}: expected {expected}")
         return default
     CONFIG_OVERRIDES[variable] = raw
-    return int(value) if float(value).is_integer() else value
+    return int(value) if isinstance(value, float) and value.is_integer() else value
+
+
+def format_limit(value: int | float) -> str:
+    """A limit as the agent reads it: "50", "500,000" or "0.5", never "1e+06"."""
+    return f"{value:,}" if isinstance(value, int) else f"{value:g}"
 
 
 # --- Resource limits (enforced by profiler_core.loader) ---

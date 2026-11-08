@@ -70,7 +70,8 @@ HTTP_INSTRUCTIONS = (
     "Deterministic data quality profiling and cleaning for CSV and Excel data. "
     "This server is remote and can't see your files: send the data itself as "
     "inline_content (CSV as plain text, .xlsx as base64) with a filename_hint. "
-    f"A request can carry up to {config.MAX_HTTP_REQUEST_MB:g} MB, and base64 "
+    f"A request can carry up to {config.format_limit(config.MAX_HTTP_REQUEST_MB)} "
+    "MB, and base64 "
     "adds about a third. "
     + _ABOUT
     + " clean_dataset applies a list of cleaning steps and returns the cleaned "
@@ -151,7 +152,8 @@ def create_http_app(
     starlette_app = server.streamable_http_app(
         stateless_http=True,
         json_response=True,
-        max_request_body_size=int(config.MAX_HTTP_REQUEST_MB * 1024 * 1024),
+        # At least one byte: a tiny override must not reach the SDK as 0
+        max_request_body_size=max(1, int(config.MAX_HTTP_REQUEST_MB * 1024 * 1024)),
         transport_security=security,
         host=host,
     )

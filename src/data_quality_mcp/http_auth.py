@@ -110,8 +110,14 @@ class BearerAuthMiddleware:
         return hmac.compare_digest(match.group(1).encode("latin-1"), self._token)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":  # lifespan: the SDK starts its session manager
+        if scope["type"] == "lifespan":  # the SDK starts its session manager here
             await self.app(scope, receive, send)
+            return
+        if scope["type"] != "http":
+            # Fail closed: nothing here serves WebSockets, and a later SDK
+            # route must not get around the token
+            if scope["type"] == "websocket":
+                await send({"type": "websocket.close", "code": 1008})
             return
 
         status = 500  # if the app fails before it starts a response

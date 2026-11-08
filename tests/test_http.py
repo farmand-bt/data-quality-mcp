@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from data_quality_mcp import config
 from data_quality_mcp.cleaner_core import cleaning
@@ -117,6 +118,16 @@ def test_a_token_in_the_url_is_never_read(client):
     assert response.status_code == 401
 
 
+@pytest.mark.parametrize("token", [TOKEN, None], ids=["auth", "no-auth"])
+def test_websockets_are_refused(token):
+    # Fail closed: only lifespan and http scopes reach the app
+    with serve(token=token) as c:
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with c.websocket_connect("/mcp", headers=AUTH):
+                pass
+    assert exc.value.code == 1008
+
+
 def test_no_auth_serves_without_a_token():
     with serve(token=None) as c:
         assert _post_mcp(c, None).status_code == 200
@@ -214,6 +225,13 @@ def test_a_chunked_body_over_the_cap_gets_413(one_mb_cap):
         "/mcp", content=chunks(), headers={**MCP_HEADERS, **AUTH}
     )
     assert response.status_code == 413
+
+
+def test_a_cap_below_one_byte_still_builds(monkeypatch):
+    # A tiny override must not reach the SDK as 0, which it rejects
+    monkeypatch.setattr(config, "MAX_HTTP_REQUEST_MB", 1e-9)
+    with serve() as c:
+        assert rpc(c, "tools/list").status_code == 413
 
 
 def test_a_body_under_the_cap_is_served(one_mb_cap):

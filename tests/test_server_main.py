@@ -117,13 +117,29 @@ def test_a_valid_token_is_served(monkeypatch, caplog, served, token):
         assert client.post("/mcp", json=body, headers=headers).status_code == 200
 
 
-def test_logs_are_plain_lines_on_stderr(monkeypatch, served):
+def test_main_drops_the_sdks_rich_handler(monkeypatch, served):
     from rich.logging import RichHandler
 
     root = logging.getLogger()
     monkeypatch.setattr(root, "handlers", [*root.handlers, RichHandler()])
     server.main([])
     assert not any(isinstance(h, RichHandler) for h in root.handlers)
+
+
+def test_logs_are_plain_lines_on_stderr():
+    # A real process: no test handler is in the way of basicConfig
+    env = {k: v for k, v in os.environ.items() if not k.startswith("DATA_QUALITY")}
+    result = subprocess.run(
+        [sys.executable, "-m", "data_quality_mcp.server", "--transport", "http"],
+        env={**env, "COLUMNS": "60"},  # rich would wrap at 60 columns
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert result.stdout == ""
+    lines = result.stderr.strip().splitlines()
+    assert len(lines) == 1
+    assert " ERROR data_quality_mcp.server: data-quality-mcp: Set " in lines[0]
 
 
 def test_uvicorn_logs_go_to_stderr():
@@ -140,8 +156,12 @@ def test_no_auth_is_accepted_on_loopback(caplog, served, host):
     server.main(["--transport", "http", "--host", host, "--no-auth"])
     assert served["host"] == host
     assert "Auth is off (--no-auth)" in caplog.text
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+    headers = {"Accept": "application/json, text/event-stream"}
     with TestClient(served["app"], base_url="http://127.0.0.1:8000") as client:
-        assert client.post("/mcp", json={}).status_code != 401
+        response = client.post("/mcp", json=body, headers=headers)
+    assert response.status_code == 200
+    assert len(response.json()["result"]["tools"]) == 5
 
 
 @pytest.mark.parametrize("host", ["0.0.0.0", "127.0.0.2", "192.168.1.5"])
@@ -199,7 +219,9 @@ def test_allowed_hosts_are_parsed():
 
 
 @pytest.mark.parametrize("name", LIMITS)
-@pytest.mark.parametrize("value", ["abc", "0", "-1", "inf", "nan", "1e400"])
+@pytest.mark.parametrize(
+    "value", ["abc", "0", "-1", "inf", "nan", "1e400", "1" + "0" * 400]
+)
 def test_an_invalid_limit_keeps_the_default_and_is_reported(reload_config, name, value):
     reload_config(**{name: value})
     expected = "a positive whole number" if name == "MAX_ROWS" else "a positive number"
@@ -243,6 +265,14 @@ def test_valid_overrides_are_applied_and_logged(reload_config, caplog, served):
     assert "Limit override: DATA_QUALITY_MCP_MAX_FILE_SIZE_MB=20" in caplog.text
     assert "Limit override: DATA_QUALITY_MCP_MAX_HTTP_REQUEST_MB=0.5" in caplog.text
     assert served == {"stdio": True}
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [(50, "50"), (500_000, "500,000"), (1_000_000, "1,000,000"), (0.5, "0.5")],
+)
+def test_limits_are_formatted_for_the_agent(value, text):
+    assert config.format_limit(value) == text
 
 
 def test_an_override_reaches_the_core():
