@@ -24,8 +24,8 @@ An MCP (Model Context Protocol) server that exposes the core logic of the Data Q
 | Testing                | `pytest`, `pytest-cov`, anyio plugin     | Unit tests for core logic; in-memory `mcp.Client` tests for tools   |
 | Environment / tasks    | `uv`, GNU `make`                         | `uv sync` manages `.venv` + `uv.lock`; `make` wraps common commands |
 | Debugging (dev only)   | MCP Inspector (bundled with the SDK)     | Interactive tool for testing tools/resources/prompts before wiring to a real client |
-| Transport (Milestone 4)| Streamable HTTP (via SDK)                | Lets the server run remotely, not just locally over stdio           |
-| Containerization (M4)  | Docker                                   | Standard way to deploy an MCP server remotely                       |
+| Transport (Milestone 4)| Streamable HTTP (via SDK), uvicorn       | Lets the server run remotely, not just locally over stdio; stateless, behind a bearer token |
+| Containerization (M4)  | Docker (`python:3.13-slim`, from `uv.lock`) | Standard way to deploy an MCP server remotely; built and smoke-tested in CI |
 | CI/CD                  | GitHub Actions + Dependabot              | Free for public repos; every change goes through a PR gated by checks |
 | AI code review         | `anthropics/claude-code-action`          | Runs on PRs, authenticated with the Claude Pro subscription (OAuth token, no API key) |
 
@@ -43,7 +43,7 @@ An MCP (Model Context Protocol) server that exposes the core logic of the Data Q
 │        Claude Desktop · Cursor · claude.ai · custom agent      │
 └─────────────────────────────┬───────────────────────────────────┘
                                │  MCP protocol (JSON-RPC)
-                               │  stdio (local) or Streamable HTTP (remote, M4)
+                               │  stdio (local) or Streamable HTTP (bearer token, M4)
                                ▼
 ┌───────────────────────────────────────────────────────────────┐
 │                    data-quality-mcp-server                      │
@@ -76,25 +76,26 @@ data-quality-mcp/
 │
 ├── CLAUDE.md                        # Standing invariants for every Claude Code session
 ├── .github/
-│   ├── dependabot.yml               # Weekly pip + GitHub Actions updates
+│   ├── dependabot.yml               # Weekly uv, GitHub Actions and Docker updates
 │   └── workflows/
 │       ├── commitlint.yml           # PR title follows Conventional Commits
 │       ├── lint.yml                 # ruff check + ruff format --check
 │       ├── test.yml                 # pytest matrix (Ubuntu + Windows × Python 3.10–3.13)
-│       ├── build.yml                # wheel/sdist build + twine check (Docker build added M4)
+│       ├── build.yml                # wheel/sdist build + twine check; Docker image build + HTTP smoke test (M4)
 │       ├── security.yml             # pip-audit, Bandit, CodeQL
 │       └── claude-review.yml        # Claude Code Review on PRs
 ├── README.md                        # What MCP is, how to connect, tool reference
 ├── pyproject.toml                   # Dependencies, src layout, entry point
-├── .env.example                     # Only needed once remote auth is added (Milestone 4)
+├── .env.example                     # Token, allowed hosts and limit overrides for HTTP/Docker (Milestone 4)
 ├── .gitignore
 ├── Makefile
 │
 ├── src/
 │   └── data_quality_mcp/
 │       ├── __init__.py
-│       ├── server.py                # Creates the MCPServer app, calls each tools module's register(app), runs it
-│       ├── config.py                # Settings: size limits, thresholds (no mcp imports)
+│       ├── server.py                # Command line; creates the MCPServer app, calls each tools module's register(app); the HTTP app
+│       ├── http_auth.py             # Bearer-token middleware and request log for HTTP (Starlette, no mcp; Milestone 4)
+│       ├── config.py                # Settings: size limits, thresholds, env overrides (no mcp imports)
 │       │
 │       ├── profiler_core/           # Vendored + simplified profiling engine (pure Python)
 │       │   ├── __init__.py
@@ -125,6 +126,7 @@ data-quality-mcp/
 │       └── tools/                   # Thin MCP-facing layer — with server.py, the only code that imports `mcp`
 │           ├── __init__.py
 │           ├── inputs.py            # Shared argument types (file_path / inline_content / ...)
+│           ├── options.py           # Per-server options (file access on/off) read through ctx (Milestone 4)
 │           ├── profiling_tools.py   # Plain functions + register(app: MCPServer)
 │           ├── cleaning_tools.py    # Added Milestone 3
 │           ├── resources.py         # Added Milestone 2
@@ -132,25 +134,31 @@ data-quality-mcp/
 │
 ├── tests/
 │   ├── conftest.py
-│   ├── test_architecture.py         # Fails if core packages import mcp, or if src/ calls print()
+│   ├── test_architecture.py         # Fails if core packages import mcp or the web stack, or if src/ calls print()
 │   ├── test_loader.py
 │   ├── test_profiler_core.py
 │   ├── test_cleaner_core.py
 │   ├── test_writer.py
 │   ├── test_tools.py
+│   ├── test_http.py                 # The HTTP transport in process (Milestone 4)
+│   ├── test_server_main.py          # Command line, token rules, limit overrides (Milestone 4)
 │   └── fixtures/
 │       ├── clean_sample.csv
 │       └── messy_sample.csv
 │
 ├── examples/
 │   ├── claude_desktop_config.json   # Example client config for local stdio connection
+│   ├── vscode_mcp.json              # VS Code over HTTP, token from a password prompt (Milestone 4)
+│   ├── inspector_config.json        # MCP Inspector over HTTP (Milestone 4)
 │   └── sample_datasets/
 │       └── messy_data.csv
 │
 ├── scripts/
-│   └── generate_messy_data.py
+│   ├── generate_messy_data.py
+│   └── docker_smoke_test.py         # Standard-library HTTP smoke test of the image (Milestone 4)
 │
-├── Dockerfile                       # Added Milestone 4
+├── Dockerfile                       # Added Milestone 4: two stages, non-root, health check
+├── .dockerignore                    # Keeps data, secrets and caches out of the build context
 │
 └── docs/
     └── architecture.md
@@ -168,11 +176,12 @@ This project is built across 5 milestones, plus a short Milestone 3.5 — delibe
 | **2** ✅  | **Expanded Tool Surface** ([spec](milestone-2.md)) | Outliers, duplicates, correlations, recommendations tools; a resource; a prompt |
 | **3** ✅  | **Flexible Input + Cleaning Tools** ([spec](milestone-3.md)) | Inline data support (not just file paths), cleaning tools ported from the cleaner engine |
 | **3.5** ✅ | **Profiling Follow-ups** ([spec](milestone-3.5.md)) | What missing values go with, possible placeholder codes, repeated IDs, ISO dates in CSVs, a minimum for correlations, finite-only fills |
-| **4**     | **Remote Deployment**                 | Streamable HTTP transport, Docker, minimal auth, a live deployment            |
+| **4** ✅  | **Remote-Ready Server** ([spec](milestone-4.md)) | Streamable HTTP transport, bearer auth, no file access over HTTP, Docker image and CI |
+| **Later** | **Live Deployment and OAuth**         | A hosting choice, a published image, OAuth for claude.ai connectors. Specced once a host and an identity provider are chosen: a Milestone 4.5 or part of M5 |
 | **5**     | **Polish & Docs**                     | README with connection guides, full test pass, optional MCP registry listing  |
 
 **Important for scaffolding decisions made now:**
-- **The core/tools boundary is the single most important structural decision in this project.** `profiler_core/`, `cleaner_core/`, and `config.py` must never import anything from `mcp`. They should be plain, testable Python that could be reused outside an MCP context. Only `tools/` and `server.py` touch the MCP SDK — this keeps the core logic transport-agnostic ahead of Milestone 4, when a second transport (HTTP) is added alongside stdio.
+- **The core/tools boundary is the single most important structural decision in this project.** `profiler_core/`, `cleaner_core/`, and `config.py` must never import anything from `mcp`, nor (since Milestone 4) the web stack. They should be plain, testable Python that could be reused outside an MCP context. Only `tools/` and `server.py` touch the MCP SDK — this keeps the core logic transport-agnostic ahead of Milestone 4, when a second transport (HTTP) is added alongside stdio.
 - **Registration pattern (avoids circular imports and keeps the boundary clean):** each `tools/*.py` module defines plain functions plus a `register(app: MCPServer) -> None` function that registers them. `server.py` creates the app, calls each module's `register(app)`, and runs it. Tool modules never import a global app object from `server.py`.
 - **The boundary is enforced by a test, not by review alone:** `tests/test_architecture.py` walks `profiler_core/` and `cleaner_core/` (and `config.py`) and fails on any `import mcp` / `from mcp`.
 - `profiler_core/loader.py` was designed from Milestone 1 to accept either a `file_path` or `inline_content`, so the tools could gain inline input in Milestone 3 without a redesign. Inline CSV is plain text and inline XLSX is base64 (see Dual Input Mode).
@@ -272,7 +281,7 @@ Over stdio, stdout *is* the JSON-RPC channel — any stray `print()` corrupts th
 `quality_score` (0–100) and `quality_grade` must come from a deterministic, documented formula — not an ad-hoc one invented during implementation. In Milestone 1 only completeness (missing values) and type consistency (type mismatches) are available, so the formula should be a weighted-penalty model over those components, designed so later components (duplicates, outliers) can be added in Milestone 2 without changing its shape. The formula and weights were approved in Milestone 1, completed in Milestone 2, and are documented in [`docs/architecture.md`](../docs/architecture.md#quality-score) and served as `dataquality://docs/quality-score`. Grades map from score via `QUALITY_GRADE_THRESHOLDS`.
 
 ### Dual Input Mode
-Tools need to work both when the server runs locally over stdio (where reading a file path on disk is natural) and when it's deployed remotely over HTTP (where the server has no access to the caller's filesystem, so the caller must send the data itself). Since Milestone 3 every tool accepts `file_path`, or `inline_content` plus `filename_hint`, whose extension sets the format. **CSV is sent as plain text and XLSX as base64**: a model can't reliably produce base64 without a code tool, and CSV text costs about a third fewer tokens (milestone-3.md, D2). `clean_dataset` returns its output the same way the input came in. On Windows, network and device paths are rejected for both input and output.
+Tools need to work both when the server runs locally over stdio (where reading a file path on disk is natural) and when it's deployed remotely over HTTP (where the server has no access to the caller's filesystem, so the caller must send the data itself). Since Milestone 3 every tool accepts `file_path`, or `inline_content` plus `filename_hint`, whose extension sets the format. **CSV is sent as plain text and XLSX as base64**: a model can't reliably produce base64 without a code tool, and CSV text costs about a third fewer tokens (milestone-3.md, D2). `clean_dataset` returns its output the same way the input came in. On Windows, network and device paths are rejected for both input and output. **Over HTTP, `file_path` and `output_path` are refused** before any filesystem call, since a path would name a file on the server's own disk (milestone-4.md, D3); callers send their data inline.
 
 ### No LLM Dependency
 This server does not call an LLM at any point. It's intentionally pure, deterministic tooling — the reasoning happens in whatever agent calls it. This is a deliberate contrast to your other two projects and worth calling out explicitly in the README: not every AI-adjacent project needs to call a model directly.
@@ -284,22 +293,22 @@ Carried over from the Data Quality Analyzer, and tightened in Milestone 3:
 - Nothing is written unless every step succeeds.
 
 ### PR-Gated Workflow and CI
-Every change (feature, fix, refactor, docs) goes through a branch and a PR. The `main protection` ruleset requires a PR and the required CI checks (Lint, Test, Build, Security and Commitlint jobs), and blocks force pushes and branch deletion. The repo allows squash merge only and deletes merged branches automatically. The repository admin (the owner) is a bypass actor, so a deliberate direct push or force push is still possible. Claude sessions and Dependabot always go through PRs. Because the PR title becomes the squash commit message, commitlint checks the PR title. If the test matrix or a job name changes, the ruleset's required-check list must be updated too.
+Every change (feature, fix, refactor, docs) goes through a branch and a PR. The `main protection` ruleset requires a PR and the required CI checks (Lint, Test, Build, Docker image, Security and Commitlint jobs), and blocks force pushes and branch deletion. The repo allows squash merge only and deletes merged branches automatically. The repository admin (the owner) is a bypass actor, so a deliberate direct push or force push is still possible. Claude sessions and Dependabot always go through PRs. Because the PR title becomes the squash commit message, commitlint checks the PR title. If the test matrix or a job name changes, the ruleset's required-check list must be updated too.
 
 | Workflow            | Trigger                         | Checks                                                                 |
 |---------------------|----------------------------------|-------------------------------------------------------------------------|
 | `commitlint.yml`    | pull_request                     | PR title matches Conventional Commits                                  |
 | `lint.yml`          | pull_request, push to `main`     | `ruff check`, `ruff format --check`                                    |
 | `test.yml`          | pull_request, push to `main`     | `pytest` with coverage; Ubuntu × Python 3.10–3.14, Windows × 3.10 and 3.14 (covers pandas 2 and 3) |
-| `build.yml`         | pull_request, push to `main`     | `uv build`, `twine check --strict`, installed-wheel smoke test; Docker build from M4 |
+| `build.yml`         | pull_request, push to `main`     | `uv build`, `twine check --strict`, installed-wheel smoke test; `Docker image` job: build, HTTP smoke test, no token in the log, refusal without a token |
 | `security.yml`      | pull_request, push to `main`, weekly | `pip-audit` (dependency CVEs), Bandit (code), CodeQL (Python)       |
 | `claude-review.yml` | pull_request                     | `anthropics/claude-code-action` review, authenticated via a `CLAUDE_CODE_OAUTH_TOKEN` repo secret generated with `claude setup-token` (uses the Pro subscription, no API key). Advisory, not a required check, so a usage limit can't block merges. Can be disabled if usage runs high. |
-| Dependabot          | weekly                           | `uv` and GitHub Actions version updates, one grouped PR each           |
+| Dependabot          | weekly                           | `uv`, GitHub Actions and Docker base-image updates, one grouped PR each |
 
 Action versions are pinned to a specific release, and each workflow sets minimal `permissions:`.
 
 ### Resource Limits
-Since this server may eventually be reachable over the internet (Milestone 4), size and row limits belong in `config.py` from the start — e.g., a max file size in MB and a max row count — even though there's no remote exposure yet to actually abuse them.
+Since this server may be reachable over the internet, size and row limits belong in `config.py` from the start — e.g., a max file size in MB and a max row count. Milestone 4 adds a request-body cap for HTTP (16 MB) and lets five limits be overridden by `DATA_QUALITY_MCP_*` environment variables, read and validated in `config.py` only; an invalid value stops the server at startup (milestone-4.md, D4).
 
 ---
 

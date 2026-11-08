@@ -117,6 +117,15 @@ def test_a_valid_token_is_served(monkeypatch, caplog, served, token):
         assert client.post("/mcp", json=body, headers=headers).status_code == 200
 
 
+def test_logs_are_plain_lines_on_stderr(monkeypatch, served):
+    from rich.logging import RichHandler
+
+    root = logging.getLogger()
+    monkeypatch.setattr(root, "handlers", [*root.handlers, RichHandler()])
+    server.main([])
+    assert not any(isinstance(h, RichHandler) for h in root.handlers)
+
+
 def test_uvicorn_logs_go_to_stderr():
     handlers = server.LOG_CONFIG["handlers"].values()
     assert {h["stream"] for h in handlers} == {"ext://sys.stderr"}

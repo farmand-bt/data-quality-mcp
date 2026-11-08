@@ -4,7 +4,7 @@ An MCP server that exposes the core logic of the Data Quality Analyzer project a
 
 Instead of a person uploading a CSV to a dashboard, an agent calls `profile_dataset` as part of its own workflow and gets back a structured, schema-validated quality report. The server makes **no LLM calls**: it is deterministic tooling, and the reasoning happens in whichever agent calls it.
 
-> **Status:** Milestones 1–3.5 of 5. Profiling covers types, statistics, missing values and what they go with, outliers and possible placeholder codes, duplicates and repeated IDs, correlations, prioritized recommendations and a quality score. `clean_dataset` applies cleaning steps and reports what changed. Every tool takes a file path or the data inline. Remote (HTTP) deployment comes in Milestone 4. See [`planning/project-overview.md`](planning/project-overview.md) and the per-milestone specs in [`planning/`](planning/).
+> **Status:** Milestones 1–4 of 5. Profiling covers types, statistics, missing values and what they go with, outliers and possible placeholder codes, duplicates and repeated IDs, correlations, prioritized recommendations and a quality score. `clean_dataset` applies cleaning steps and reports what changed. Every tool takes a file path or the data inline. The server runs over stdio or over HTTP with a bearer token, and ships as a Docker image; a live deployment with OAuth comes later. See [`planning/project-overview.md`](planning/project-overview.md) and the per-milestone specs in [`planning/`](planning/).
 
 ## Tools
 
@@ -24,7 +24,7 @@ Every tool takes either `file_path`, an absolute path on the machine running the
 - **CSV:** send it as plain text.
 - **XLSX:** send it base64-encoded. `filename_hint` (e.g. `sales.csv` or `report.xlsx`) sets the format and becomes the dataset's name.
 
-Inline data is for small datasets: every character passes through the conversation. The limits are 50 MB, 500,000 rows, and for XLSX 200 MB unpacked. On Windows, network paths (`\\server\share\...`) are rejected, because opening one connects to that host and can leak your login credentials.
+Inline data is for small datasets: every character passes through the conversation. The limits are 50 MB, 500,000 rows, and for XLSX 200 MB unpacked (they can be changed, see [Limits](#limits)). On Windows, network paths (`\\server\share\...`) are rejected, because opening one connects to that host and can leak your login credentials. Over HTTP, `file_path` and `output_path` are refused: send the data inline (see [Run over HTTP](#run-over-http)).
 
 ### Cleaning
 
@@ -56,7 +56,7 @@ Placeholder codes that `detect_outliers` lists under `possible_sentinels` are on
  "method": "sentinel", "values": [-1000, 9999999]}
 ```
 
-**Trust:** the server runs with your permissions, so `file_path` and `output_path` can reach anything you can. That's normal for a local stdio server, but be careful with data from untrusted sources: text in the data could steer an agent. A cleaned file isn't sanitized for spreadsheets either. Cells starting with `=`, `+`, `-` or `@` stay live formulas when the file is opened in Excel.
+**Trust:** over stdio the server runs with your permissions, so `file_path` and `output_path` can reach anything you can. That's normal for a local stdio server, but be careful with data from untrusted sources: text in the data could steer an agent. Over HTTP a caller can only send data and get results back, never read or write the server's files. A cleaned file isn't sanitized for spreadsheets either. Cells starting with `=`, `+`, `-` or `@` stay live formulas when the file is opened in Excel.
 
 ## Resources & prompts
 
@@ -110,6 +110,65 @@ On macOS/Linux the command is `~/.local/bin/data-quality-mcp` (use the absolute 
 
 Then ask the agent something like *"Profile C:\data\sales.csv and tell me what needs cleaning."*, and once you agree with its plan, *"Apply it."*
 
+## Run over HTTP
+
+`data-quality-mcp --transport http` serves [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) at `http://127.0.0.1:8000/mcp` (stateless, JSON responses). `--host` and `--port` change the address. `GET /health` answers `{"status": "ok"}` without a token.
+
+**The token** is required on every host. Every request must carry it as `Authorization: Bearer <token>`:
+
+1. Copy `.env.example` to `.env` (it's gitignored) and set `DATA_QUALITY_MCP_TOKEN`. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. It needs at least 32 characters from `A-Z a-z 0-9 - . _ ~ + /`. Write it **unquoted**: `docker --env-file` would keep quotes as part of the value.
+2. `make run-http` (or `uv run --env-file .env data-quality-mcp --transport http`).
+
+Without a token the server refuses to start and says why. For a quick local experiment, `--no-auth` turns auth off, and only `127.0.0.1`, `localhost` or `::1` accept it. **Never use `--no-auth` behind a reverse proxy or a tunnel** (nginx, Caddy, cloudflared…): a proxy on the same machine forwards public traffic from a loopback address, so the server would be open to anyone who can reach the proxy.
+
+**Clients:**
+- **Claude Code:** `claude mcp add --transport http data-quality http://localhost:8000/mcp --header "Authorization: Bearer <token>"`
+- **VS Code:** [`examples/vscode_mcp.json`](examples/vscode_mcp.json), for `.vscode/mcp.json`. It prompts for the token and stores it securely, so the file holds no secret.
+- **MCP Inspector (v2):** `npx @modelcontextprotocol/inspector --cli --transport http --server-url http://localhost:8000/mcp --header "Authorization: Bearer <token>" --method tools/list`, or the config file [`examples/inspector_config.json`](examples/inspector_config.json) (`--config ... --server data-quality-http`). That file holds the token as written, so keep your copy out of git.
+- **Claude Desktop and claude.ai:** use stdio (above). A custom connector needs a public HTTPS address and OAuth, which come with the later deployment.
+
+**What's different over HTTP:**
+- **No file access:** the server can't see your files, so `file_path` and `output_path` are refused with an error that says to send the data inline. `clean_dataset` returns the cleaned data in the result.
+- **Request size:** a request can carry up to 16 MB (`DATA_QUALITY_MCP_MAX_HTTP_REQUEST_MB`). A larger one gets HTTP `413` before any tool runs, so the agent sees a transport error, not a tool error. A CSV can use almost all of it, minus the JSON envelope and escaping. Base64 adds a third, so an `.xlsx` can be about 12 MB.
+- **Host check:** on loopback the SDK rejects requests whose `Host` or `Origin` isn't local (DNS-rebinding protection). On a public interface, set `DATA_QUALITY_MCP_ALLOWED_HOSTS` (comma-separated, e.g. `mcp.example.com,mcp.example.com:443`) to the hostnames clients use. `/health` isn't host-checked, so a container's health check keeps working.
+- **TLS:** the server speaks plain HTTP. Anywhere beyond localhost it must sit behind TLS (a hosting platform or a reverse proxy), or the token travels in clear text.
+- **Logs** go to stderr: one line per request with the method, the path (escaped, without the query string) and the status. The token, headers and bodies are never logged. Requests without a token are logged too, so a public deployment should rate-limit or rotate logs.
+
+**Sizing** (peak memory of the server process, measured in the Docker image):
+
+| Input | Peak |
+|---|---|
+| Idle server | ~170 MiB |
+| 15.4 MiB CSV over HTTP (302,000 rows × 8 columns) | ~345 MiB |
+| 14.7 MiB of base64 `.xlsx` (290,000 rows × 14 numeric columns) | ~435 MiB |
+| 2.9 MiB of base64 `.xlsx` of long text, unpacking to 191 MiB | ~600 MiB |
+| 46 MB CSV over stdio (499,000 rows × 12 columns) | ~500 MiB |
+
+Plan for about 1 GiB for one call at a time. Concurrent calls each need their own memory and add up: the server is single-tenant, with no concurrency cap. Lower the limits below for a smaller container.
+
+## Docker
+
+```bash
+make docker-build   # docker build -t data-quality-mcp .
+make docker-run     # docker run --rm --env-file .env -p 8000:8000 data-quality-mcp
+```
+
+The image (Python 3.13, installed exactly from `uv.lock`) runs as a non-root user and serves HTTP on port 8000, with a health check on `/health`. The token is passed at run time and never stored in the image; without one the container exits at startup. It is built and smoke-tested in CI, and not published to a registry yet.
+
+## Limits
+
+These limits can be changed with environment variables, on both transports:
+
+| Variable | Default |
+|---|---|
+| `DATA_QUALITY_MCP_MAX_FILE_SIZE_MB` | 50 |
+| `DATA_QUALITY_MCP_MAX_ROWS` | 500,000 |
+| `DATA_QUALITY_MCP_MAX_XLSX_UNCOMPRESSED_MB` | 200 |
+| `DATA_QUALITY_MCP_MAX_INLINE_OUTPUT_MB` | 1 |
+| `DATA_QUALITY_MCP_MAX_HTTP_REQUEST_MB` | 16 |
+
+Each must be a positive number (a whole number for rows). Overrides in effect are logged at startup. An invalid value stops the server with a message naming the variable, on stdio too: in Claude Desktop the server then shows as failed, and the message is in its MCP log, `mcp-server-data-quality.log` in Claude's `logs` folder (`%APPDATA%\Claude\logs`, or `%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\logs` for the Microsoft Store version).
+
 ## Development
 
 ```bash
@@ -119,9 +178,9 @@ make format         # auto-fix + format
 make generate-data  # regenerate synthetic fixtures
 ```
 
-Architecture and design rules are in [`docs/architecture.md`](docs/architecture.md) and [`CLAUDE.md`](CLAUDE.md). The key rule: the engines (`profiler_core/`, `cleaner_core/`) never import the MCP SDK. Only `tools/` and `server.py` do, and a test enforces this.
+Architecture and design rules are in [`docs/architecture.md`](docs/architecture.md) and [`CLAUDE.md`](CLAUDE.md). The key rule: the engines (`profiler_core/`, `cleaner_core/`) never import the MCP SDK or a web framework. Only `tools/` and `server.py` touch the SDK, and a test enforces this.
 
-Every change goes through a pull request. CI runs commitlint on the PR title, lint, tests (Ubuntu and Windows, Python 3.10–3.14), build, security scans (pip-audit, Bandit, CodeQL) and an automated Claude review.
+Every change goes through a pull request. CI runs commitlint on the PR title, lint, tests (Ubuntu and Windows, Python 3.10–3.14), the package and Docker image builds (with an HTTP smoke test of the image), security scans (pip-audit, Bandit, CodeQL) and an automated Claude review.
 
 ## License
 

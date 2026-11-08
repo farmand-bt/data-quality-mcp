@@ -3,20 +3,32 @@
 ## Layers
 
 ```
-MCP client (Claude Desktop, Cursor, custom agent)
-        │  JSON-RPC over stdio (Streamable HTTP from Milestone 4)
+MCP client (Claude Desktop, Cursor, Claude Code, VS Code, custom agent)
+        │  JSON-RPC over stdio, or Streamable HTTP (/mcp, stateless, JSON responses)
         ▼
-server.py           create_server(): builds MCPServer, calls each tools module's register(app)
+http_auth.py        HTTP only: bearer-token middleware and per-request log (Starlette, no mcp)
         │
+server.py           command line; create_server(): builds MCPServer with the per-transport
+        │           options and calls each tools module's register(app); the HTTP app (uvicorn)
 tools/              thin adapters: validate args, call the core, map domain errors to ToolError
         │
 cleaner_core/       pure Python cleaning engine: handlers, pipeline, writer, run_cleaning.
         │           Uses profiler_core. Never imports `mcp`.
 profiler_core/      pure Python engine (pandas/numpy): loader, type detection, stats,
-config.py           missing values, report, schema. Never imports `mcp`.
+config.py           missing values, report, schema. Never imports `mcp` or a web framework.
 ```
 
-**The rule:** only `server.py` and `tools/` may import the MCP SDK. `profiler_core/`, `cleaner_core/` and `config.py` never do. `tests/test_architecture.py` parses every core file and fails the build if one imports `mcp`. Because of this, adding the HTTP transport in Milestone 4 means adding an entry point, not rewriting the engine.
+**The rule:** only `server.py` and `tools/` may import the MCP SDK. `profiler_core/`, `cleaner_core/` and `config.py` never do, and they don't import the web stack either (`starlette`, `uvicorn`, `httpx2`, `sse_starlette`). `http_auth.py` uses Starlette but not the SDK. `tests/test_architecture.py` parses every file concerned and fails the build on a forbidden import. Because of this, the HTTP transport in Milestone 4 added an entry point and one keyword to the core (`allow_file_path`), not a rewrite.
+
+## Transports (Milestone 4)
+
+- **stdio** (the default): unchanged since Milestone 1. The client launches the server.
+- **Streamable HTTP** (`--transport http`): `server.create_http_app` builds the SDK's Starlette app (`stateless_http=True`, `json_response=True`), adds `GET /health`, sets the request-body cap from `config.MAX_HTTP_REQUEST_MB`, and wraps it all in `http_auth.BearerAuthMiddleware`. uvicorn serves it with a log config that writes only to stderr, with its access log off.
+- **The token** (`DATA_QUALITY_MCP_TOKEN`) is required on every host. `--no-auth` turns auth off, and only the three loopback hosts accept it: a reverse proxy on the same machine makes public traffic look local. The middleware compares bytes in constant time, and exempts exactly `GET`/`HEAD /health`.
+- **Host checks:** the SDK's DNS-rebinding protection applies on loopback. Elsewhere, `DATA_QUALITY_MCP_ALLOWED_HOSTS` enables it. It runs inside the MCP transport, so `/health` isn't host-checked.
+- **The per-transport switch:** `create_server(allow_file_path=False)` gives the app a lifespan that yields `tools.options.ServerOptions`. Each tool takes an optional `ctx: Context | None`, which the SDK injects and leaves out of the input schema, and reads the options through `file_path_allowed(ctx)`. It fails closed: a call that came through a server without those options can't use file paths. A direct Python call (`ctx` is `None`) can. The core gets only `allow_file_path=False` and rejects `file_path` and `output_path` before any filesystem call.
+- **Limits from the environment:** `config.py` reads five `DATA_QUALITY_MCP_*` overrides at import, before any core module binds its keyword defaults. An invalid value is collected in `CONFIG_ERRORS`, and `main()` reports it and exits with status 2.
+- **Docker:** a two-stage `python:3.13-slim` image installed from `uv.lock` with `--frozen`, running as a non-root user, with a health check on `/health`. CI builds it and smoke-tests it over HTTP (`scripts/docker_smoke_test.py`).
 
 ## Registration pattern
 
@@ -31,8 +43,9 @@ def register(app: MCPServer) -> None:
                  annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
 
 # server.py
-def create_server() -> MCPServer:
-    app = MCPServer("data-quality", version=__version__, instructions=INSTRUCTIONS)
+def create_server(*, allow_file_path: bool = True) -> MCPServer:
+    app = MCPServer("data-quality", version=__version__, instructions=...,
+                    lifespan=options_lifespan(ServerOptions(allow_file_path)))
     profiling_tools.register(app)
     return app
 ```
@@ -67,7 +80,7 @@ The core never builds MCP errors, and the tools layer never swallows exceptions 
 ## JSON safety and stdio
 
 - `generate_report` passes its output through `json_safe.to_json_safe`. It converts numpy scalars to native types, NaN/inf/NaT/NA to `None` and timestamps to ISO strings, and turns keys into strings. A test asserts that `json.dumps(report, allow_nan=False)` succeeds.
-- Over stdio, stdout *is* the protocol channel, so `src/` must never call `print()`, and a test enforces this. Logs go to stderr. A subprocess test spawns the real server and completes a tool call through it.
+- Over stdio, stdout *is* the protocol channel, so `src/` must never call `print()`, and a test enforces this. Logs go to stderr, on both transports, as plain one-line records (`main()` swaps the SDK's rich handler for a plain one). A subprocess test spawns the real server and completes a tool call through it.
 
 ## Quality score
 
@@ -123,14 +136,15 @@ Each one reports evidence, not a verdict, and was checked against the problems `
 
 Every tool takes `file_path`, or `inline_content` plus `filename_hint`. Both go through `loader.load_input`:
 - **Inline formats:** CSV is plain text and XLSX is base64. A single-line base64 payload sent as CSV is rejected with a hint, so a client using the old format gets an error rather than a one-column parse.
-- **Limits:** 50 MB and 500,000 rows. For XLSX, the zip is also checked before parsing: at most 200 MB unpacked and 1,000 entries. Python's `zipfile` stops at each entry's declared size, so the declared total bounds memory.
+- **Limits:** 50 MB and 500,000 rows. For XLSX, the zip is also checked before parsing: at most 200 MB unpacked and 1,000 entries. Python's `zipfile` stops at each entry's declared size, so the declared total bounds memory. Over HTTP the request-body cap (16 MB) comes first. Five limits can be overridden from the environment (see Transports).
+- **File access:** `allow_file_path=False` (the HTTP server) rejects a `file_path` before anything else, the network-path check included.
 - **Paths:** on Windows, UNC and device paths are rejected on the raw string before any filesystem call (`profiler_core/paths.py`), because even a stat on `\\host\share` connects to that host. `config.ALLOW_NETWORK_PATHS` opts back in.
 
 ## Cleaning
 
 `clean_dataset` passes its arguments to `cleaner_core.run_cleaning`, which works in this order:
 
-1. **Path checks** that need no I/O.
+1. **Path checks** that need no I/O. With `allow_file_path=False`, a `file_path` or an `output_path` is rejected first, before the step checks, so no call can probe the disk.
 2. **Load**, then `prepare_frame` (the report's column names and a 0-based index).
 3. **`before`**, from `generate_report`.
 4. **Validate and run** the steps (`pipeline.run_steps`).
@@ -179,7 +193,7 @@ At 500,000 rows × 10 columns, `clean_dataset` takes about 8 s, including two fu
 | Resource | `dataquality://docs/quality-score` | How the score, grade and outlier methods work (`text/markdown`) |
 | Prompt | `review_data_quality(file_path)` | Guides an agent through a full review and an ordered cleaning plan |
 
-The resources are **stateless**: there's no "last report" cache. Server-side state would leak one caller's data to another once several HTTP clients connect (Milestone 4). The profiling tools are annotated read-only and closed-world. `clean_dataset` is annotated not read-only, but also not destructive (it never overwrites) and not idempotent (each call writes a new file).
+The resources are **stateless**: there's no "last report" cache. Server-side state would leak one caller's data to another once several HTTP clients connect, and the HTTP transport runs stateless (Milestone 4). The profiling tools are annotated read-only and closed-world. `clean_dataset` is annotated not read-only, but also not destructive (it never overwrites) and not idempotent (each call writes a new file).
 
 ## Compatibility
 

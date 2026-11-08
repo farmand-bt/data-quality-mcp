@@ -1,0 +1,23 @@
+# Only pyproject.toml, uv.lock, README.md, LICENSE and src/ are needed. Keep
+# local data, secrets and caches out of the build context.
+.git
+.github
+.venv
+.env
+.env.*
+data/
+tests/
+planning/
+docs/
+examples/
+scripts/
+.claude/
+dist/
+build/
+.coverage
+htmlcov/
+**/__pycache__
+**/*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/

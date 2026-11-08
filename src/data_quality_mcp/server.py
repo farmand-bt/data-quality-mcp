@@ -204,9 +204,23 @@ def _url(host: str, port: int) -> str:
     return f"http://[{host}]:{port}/mcp" if ":" in host else f"http://{host}:{port}/mcp"
 
 
+def _configure_logging() -> None:
+    """Plain, one-line log records on stderr.
+
+    MCPServer installs a rich handler on the root logger when it is created,
+    which wraps a record over several lines, so it is swapped for a plain
+    StreamHandler. Other handlers (a test's capture handler) are kept.
+    """
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if type(handler).__module__.startswith("rich."):
+            root.removeHandler(handler)
+    logging.basicConfig(stream=sys.stderr, level=logging.INFO, format=LOG_FORMAT)
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     """Console-script entry point: serve over stdio, or over HTTP."""
-    logging.basicConfig(stream=sys.stderr, level=logging.INFO, format=LOG_FORMAT)
+    _configure_logging()
     if config.CONFIG_ERRORS:
         for message in config.CONFIG_ERRORS:
             logger.error("data-quality-mcp: %s", message)
