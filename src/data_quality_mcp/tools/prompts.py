@@ -13,14 +13,23 @@ from pydantic import Field
 
 def review_data_quality(
     file_path: Annotated[
-        str, Field(description="Absolute path to the .csv or .xlsx file to review.")
+        str,
+        Field(
+            description=(
+                "Path to the .csv or .xlsx file to review (on a remote server, "
+                "the agent reads it and sends its contents)."
+            )
+        ),
     ],
 ) -> str:
     """Review a dataset's quality and propose an ordered cleaning plan."""
     return f"""Review the data quality of this file: {file_path}
 
-1. Call the `profile_dataset` tool with that exact path. If it returns an
-   error, explain the error and how to fix it, then stop.
+1. Call the `profile_dataset` tool with that exact path. If the server
+   answers that it can't read files (a remote server), read the file yourself
+   and send its contents as `inline_content`, with its name as
+   `filename_hint`. If it returns any other error, explain the error and how
+   to fix it, then stop.
 2. State the quality score and grade in one sentence. If you need to explain
    how the score is computed, read the resource dataquality://docs/quality-score.
 3. Go through the `recommendations` in order (critical first). Group related
@@ -38,7 +47,8 @@ def review_data_quality(
    is right where a key column has conflicting values.
 
 Do not modify anything yet. If the user agrees to the plan, apply it with
-`clean_dataset`, which writes a new file and never changes the original.
+`clean_dataset`, which writes a new file, or returns the cleaned data inline,
+and never changes the original.
 Keep the review concise and specific to this dataset.
 """
 

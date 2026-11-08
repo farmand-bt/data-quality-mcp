@@ -1,9 +1,11 @@
 """MCP-facing cleaning tool: a thin adapter over cleaner_core.run_cleaning."""
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
+from data_quality_mcp import config
 from data_quality_mcp.cleaner_core import run_cleaning
 from data_quality_mcp.profiler_core import DataQualityError
 from data_quality_mcp.profiler_core.schema import CleaningResult
@@ -14,6 +16,7 @@ from data_quality_mcp.tools.inputs import (
     OutputPath,
     Steps,
 )
+from data_quality_mcp.tools.options import file_path_allowed
 
 # Writes a new file (never overwrites one), so it is neither read-only nor
 # destructive; each call creates a new file, so it isn't idempotent either.
@@ -31,6 +34,7 @@ def clean_dataset(
     inline_content: InlineContent = None,
     filename_hint: FilenameHint = None,
     output_path: OutputPath = None,
+    ctx: Context | None = None,
 ) -> CleaningResult:
     """Clean a CSV or Excel dataset with a list of steps, without changing the original.
 
@@ -78,8 +82,8 @@ def clean_dataset(
       default '<name>_cleaned.<ext>' next to the input (then _cleaned_2, ...),
       or at output_path (absolute, .csv or .xlsx, must not exist).
     - Inline input returns the cleaned data in output.content instead (CSV as
-      text, .xlsx as base64), up to 1 MB of encoded text (about 0.75 MB of
-      .xlsx data). Larger results need file input.
+      text, .xlsx as base64), up to {inline_mb} MB of encoded text (about
+      {xlsx_mb} MB of .xlsx data). Larger results need file input.
     Nothing is written unless every step succeeds.
 
     Output: dataset (the input), output (path or content, format, rows,
@@ -102,9 +106,16 @@ def clean_dataset(
             inline_content=inline_content,
             filename_hint=filename_hint,
             output_path=output_path,
+            allow_file_path=file_path_allowed(ctx),
         )
     except DataQualityError as exc:
         raise ToolError(str(exc)) from exc
+
+
+# The inline limit can be overridden (config, D4), so the agent reads the real one
+clean_dataset.__doc__ = clean_dataset.__doc__.replace(
+    "{inline_mb}", f"{config.MAX_INLINE_OUTPUT_MB:g}"
+).replace("{xlsx_mb}", f"{config.MAX_INLINE_OUTPUT_MB * 0.75:g}")
 
 
 def register(app: MCPServer) -> None:

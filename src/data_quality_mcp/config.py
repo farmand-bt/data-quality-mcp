@@ -2,23 +2,66 @@
 
 These are defaults only. Core functions accept each value as a keyword
 parameter, so a caller (e.g. a remote deployment) can override limits without
-touching the core. This module must stay free of any `mcp` import.
+touching the core. This module must stay free of any `mcp` import, and of any
+web framework: it uses the standard library only.
+
+A few limits can be overridden by `DATA_QUALITY_MCP_*` environment variables,
+read here and nowhere else (planning/milestone-4.md, D4). An invalid value
+keeps its default and is recorded in CONFIG_ERRORS, which the server's main()
+reports before it serves anything. Valid overrides are listed in
+CONFIG_OVERRIDES, for the startup log.
 """
 
+import math
+import os
+
+ENV_PREFIX = "DATA_QUALITY_MCP_"
+CONFIG_ERRORS: list[str] = []
+CONFIG_OVERRIDES: dict[str, str] = {}
+
+
+def _env_limit(name: str, default: int, *, integer: bool = False) -> int | float:
+    """`default`, or the positive, finite number in DATA_QUALITY_MCP_<name>.
+
+    An unset, empty or blank variable means the default. A whole number such
+    as "20" comes back as an int, so messages read "20 MB", not "20.0 MB".
+    """
+    variable = ENV_PREFIX + name
+    raw = os.environ.get(variable, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw) if integer else float(raw)
+    except ValueError:
+        value = None
+    if value is None or not math.isfinite(value) or value <= 0:
+        expected = "a positive whole number" if integer else "a positive number"
+        CONFIG_ERRORS.append(f"invalid {variable}={raw!r}: expected {expected}")
+        return default
+    CONFIG_OVERRIDES[variable] = raw
+    return int(value) if float(value).is_integer() else value
+
+
 # --- Resource limits (enforced by profiler_core.loader) ---
-MAX_FILE_SIZE_MB = 50
-MAX_ROWS = 500_000
+MAX_FILE_SIZE_MB = _env_limit("MAX_FILE_SIZE_MB", 50)
+MAX_ROWS = int(_env_limit("MAX_ROWS", 500_000, integer=True))
 # An XLSX is a zip: cap what it may expand to, and how many entries it may
 # have, before parsing it (shared strings are held in memory in full).
-MAX_XLSX_UNCOMPRESSED_MB = 200
+MAX_XLSX_UNCOMPRESSED_MB = _env_limit("MAX_XLSX_UNCOMPRESSED_MB", 200)
 MAX_XLSX_ENTRIES = 1000
 # UNC and device paths (\\server\share, \\?\, \\.\) are rejected on Windows:
 # opening one connects to that host over SMB and can leak NTLM credentials.
 ALLOW_NETWORK_PATHS = False
+# Off over HTTP, where a path would name a file on the server's own disk
+# (planning/milestone-4.md, D3). Not overridable from the environment.
+ALLOW_FILE_PATH = True
+# Largest HTTP request body, inline data included (the SDK's default is 4 MiB)
+MAX_HTTP_REQUEST_MB = _env_limit("MAX_HTTP_REQUEST_MB", 16)
 
 # --- Cleaning (cleaner_core) ---
 MAX_CLEANING_STEPS = 50
-MAX_INLINE_OUTPUT_MB = 1  # Inline output goes into the model's context
+# Inline output goes into the model's context
+MAX_INLINE_OUTPUT_MB = _env_limit("MAX_INLINE_OUTPUT_MB", 1)
 CLEANED_SUFFIX = "_cleaned"  # <stem>_cleaned.<ext>, then _cleaned_2, ...
 
 # --- Profiling thresholds ---

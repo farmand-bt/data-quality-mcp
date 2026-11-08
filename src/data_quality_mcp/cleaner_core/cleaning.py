@@ -17,6 +17,7 @@ from data_quality_mcp.cleaner_core.writer import (
 )
 from data_quality_mcp.cleaner_core.writer import inline_content as encode_inline
 from data_quality_mcp.profiler_core.exceptions import (
+    FilePathNotAllowedError,
     FileTooLargeError,
     InvalidInputError,
     OutputWriteError,
@@ -45,6 +46,7 @@ def run_cleaning(
     max_xlsx_uncompressed_mb: float = config.MAX_XLSX_UNCOMPRESSED_MB,
     max_xlsx_entries: int = config.MAX_XLSX_ENTRIES,
     allow_network_paths: bool = config.ALLOW_NETWORK_PATHS,
+    allow_file_path: bool = config.ALLOW_FILE_PATH,
     suffix: str = config.CLEANED_SUFFIX,
     iqr_multiplier: float = config.OUTLIER_IQR_MULTIPLIER,
     zscore_threshold: float = config.OUTLIER_ZSCORE_THRESHOLD,
@@ -58,7 +60,12 @@ def run_cleaning(
     `inline_content`. Nothing is written unless every step succeeds, and
     `after` profiles the serialised output loaded back, so it equals what
     profile_dataset reports for that file.
+
+    With `allow_file_path` False, both `file_path` and `output_path` are
+    rejected before anything else, so no call can probe the filesystem.
     """
+    if not allow_file_path and (file_path is not None or output_path is not None):
+        raise FilePathNotAllowedError()
     if not steps:
         raise InvalidInputError("Give at least one cleaning step.")
     if len(steps) > max_steps:
@@ -85,6 +92,7 @@ def run_cleaning(
         inline_content,
         filename_hint,
         allow_network_paths=allow_network_paths,
+        allow_file_path=allow_file_path,
         **limits,
     )
     extension = extension or loaded.extension

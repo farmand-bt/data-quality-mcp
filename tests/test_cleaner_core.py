@@ -13,13 +13,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from data_quality_mcp.cleaner_core import run_cleaning
+from data_quality_mcp.cleaner_core import cleaning, run_cleaning
 from data_quality_mcp.cleaner_core.duplicate_handler import remove_duplicates
 from data_quality_mcp.cleaner_core.missing_handler import handle_missing
 from data_quality_mcp.cleaner_core.outlier_handler import handle_outliers
 from data_quality_mcp.cleaner_core.pipeline import run_steps, step_priority
 from data_quality_mcp.cleaner_core.type_fixer import fix_types
-from data_quality_mcp.profiler_core.exceptions import InvalidInputError
+from data_quality_mcp.profiler_core.exceptions import (
+    FilePathNotAllowedError,
+    InvalidInputError,
+)
 from data_quality_mcp.profiler_core.report import generate_report
 
 # --- fixtures (as in the analyzer) ---
@@ -1033,3 +1036,40 @@ def test_only_a_sentinel_step_computes_the_dedup_mask(
     monkeypatch.setattr(pd.DataFrame, "duplicated", spy)
     run_steps(messy_frame, steps)
     assert len(calls) == hashes
+
+
+# --- file access switch (milestone-4.md, D3) ---
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"file_path": r"C:\data\in.csv"},
+        {"output_path": r"C:\Windows\probe.csv"},
+        {"inline_content": "a\n1\n", "filename_hint": "t.csv", "output_path": "x.csv"},
+        {"file_path": "in.csv", "output_path": "out.csv"},
+    ],
+    ids=["file", "output-only", "inline-and-output", "both"],
+)
+@pytest.mark.parametrize("steps", [[{"action": "remove_duplicates"}], []])
+def test_run_cleaning_rejects_paths_first_when_file_access_is_off(
+    monkeypatch, arguments, steps
+):
+    # Before the step checks and before check_output_path, so even an invalid
+    # call can't learn anything about the disk
+    def spy(*args, **kwargs):
+        raise AssertionError("check_output_path was called")
+
+    monkeypatch.setattr(cleaning, "check_output_path", spy)
+    with pytest.raises(FilePathNotAllowedError):
+        run_cleaning(steps, allow_file_path=False, **arguments)
+
+
+def test_run_cleaning_inline_works_when_file_access_is_off():
+    result = run_cleaning(
+        [{"action": "remove_duplicates"}],
+        inline_content="a\n1\n1\n",
+        filename_hint="t.csv",
+        allow_file_path=False,
+    )
+    assert result["output"]["content"] == "a\n1\n"
