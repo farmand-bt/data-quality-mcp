@@ -21,14 +21,14 @@ A live deployment and OAuth (which a claude.ai custom connector needs) are **not
 - `tests/test_architecture.py` keeps passing, and is extended (see **Invariant changes**):
   - the core can't import the SDK's own packages (`mcp`, `mcp_types`) or a web stack (`starlette`, `uvicorn`, `httpx2`, `sse_starlette`)
   - `http_auth.py` can't import `mcp` or `mcp_types`
-- **No new packages,** but two new direct dependencies: `server.py` and `http_auth.py` import `starlette` and `uvicorn` themselves, so `pyproject.toml` declares them, with the lower bounds `mcp` already requires (`starlette>=0.48.0`, `uvicorn>=0.31.1`). Today they only arrive through `mcp`, and a later `mcp` release could drop or rename one, as it did when it moved from `httpx` to `httpx2`. The lock keeps the same versions (Starlette 1.7.0, uvicorn 0.54.0).
+- **No new third-party packages** (`http_auth.py` is a new module of this repo), but two new direct dependencies: `server.py` and `http_auth.py` import `starlette` and `uvicorn` themselves, so `pyproject.toml` declares them, with the lower bounds `mcp` already requires (`starlette>=0.48.0`, `uvicorn>=0.31.1`). Today they only arrive through `mcp`, and a later `mcp` release could drop or rename one, as it did when it moved from `httpx` to `httpx2`. The lock keeps the same versions (Starlette 1.7.0, uvicorn 0.54.0).
 
 ---
 
 ## Guiding principle: fail closed, stay simple
 
 The server is single-tenant: one token, one operator, no per-user state.
-- **Fail closed:** every rule below refuses rather than guesses. The server won't start on a public interface without a token, and it rejects a `file_path` over HTTP. A limit it can't parse stops the server at startup, with a clear message (D4).
+- **Fail closed:** every rule below refuses rather than guesses. The server won't start over HTTP without a token, unless auth is turned off on purpose with `--no-auth`, which only a loopback host accepts (D2). It rejects a `file_path` over HTTP. A limit it can't parse stops the server at startup, with a clear message (D4).
 - **Stdio doesn't change:** `data-quality-mcp` with no arguments behaves exactly as in 0.4.3, so Claude Desktop and every existing config keep working. The one accepted exception: a malformed `DATA_QUALITY_MCP_*` limit variable (D4) now stops startup on stdio too, where 0.4.3 ignored it. Unset variables change nothing.
 - **Analyzer parity:** nothing to port. Transport, auth and Docker are MCP-only, so this milestone has no **Deviations** table.
 
@@ -36,8 +36,8 @@ The server is single-tenant: one token, one operator, no per-user state.
 
 | # | Decision | Recommendation |
 |---|---|---|
-| D1 | Transport and command line | **Streamable HTTP at `/mcp`, stateless, with JSON responses.** `data-quality-mcp --transport http [--host 127.0.0.1] [--port 8000]`, which binds to loopback by default. |
-| D2 | Authentication | **One static bearer token**, from the `DATA_QUALITY_MCP_TOKEN` environment variable. A small middleware compares it in constant time. It is required except on a loopback host. OAuth comes later (D9). |
+| D1 | Transport and command line | **Streamable HTTP at `/mcp`, stateless, with JSON responses.** `data-quality-mcp --transport http [--host 127.0.0.1] [--port 8000] [--no-auth]`, which binds to loopback by default. |
+| D2 | Authentication | **One static bearer token**, from the `DATA_QUALITY_MCP_TOKEN` environment variable. A small middleware compares it in constant time. It is required on every host. `--no-auth` turns it off for local experiments, on a loopback host only. OAuth comes later (D9). |
 | D3 | `file_path` over HTTP | **Off.** Over HTTP the server rejects `file_path` and `output_path` with an error that says to send `inline_content`. Stdio is unchanged. There is no opt-in in M4. |
 | D4 | Limits | **A request-body cap for HTTP (16 MB), plus environment overrides for 5 limits,** validated at startup. The loader's limits keep their defaults. |
 | D5 | Host and Origin checks | **The SDK's DNS-rebinding protection,** automatic on loopback. Elsewhere it is enabled with an allowed-hosts list from `DATA_QUALITY_MCP_ALLOWED_HOSTS`, and off by default (the token covers that case). |
@@ -62,6 +62,7 @@ The server is single-tenant: one token, one operator, no per-user state.
 - **Logging:** stderr, as for stdio.
   - **Uvicorn's defaults don't do that:** its default `log_config` sends the access log to **stdout**, and its request line includes the query string. A client that put `?token=...` in the URL would get its token logged, even though the server never reads it.
   - So `server.py` passes its own `log_config`, with every handler on stderr, and turns uvicorn's access log off (`access_log=False`). The middleware (D2) logs one line per request instead: method, path **without the query string**, and status. `GET /health` is logged at DEBUG only, so Docker's health check doesn't fill the log.
+  - **The path is escaped and truncated** (CI review): it is attacker-controlled, and ASGI percent-decodes it, so `/mcp%0Afake` arrives with a real line break, and the line is logged before the auth check. The method and path are logged as `%r` of the value cut to 200 characters, so a control character shows as `\n` and can't start a fake log line. A test sends `/mcp%0Afake` without a token and checks that it yields one record with no line break in its message.
   - Request headers and bodies are never logged. The startup log names the transport, the address and whether auth is on, never the token.
   - A test sends a token in both the header and the query string and checks that neither appears in any log record.
 
@@ -70,13 +71,19 @@ The server is single-tenant: one token, one operator, no per-user state.
 - **The token:**
   - It comes from `DATA_QUALITY_MCP_TOKEN` in the environment.
   - A token is never accepted as a command-line argument, because process lists show arguments to other users.
-  - **Empty means unset:** an empty or whitespace-only value counts as no token. `.env.example` ships `DATA_QUALITY_MCP_TOKEN=`, which `docker --env-file` passes as an empty string, so loopback without a token keeps working (with the warning below).
+  - **Empty means unset:** an empty or whitespace-only value counts as no token. `.env.example` ships `DATA_QUALITY_MCP_TOKEN=`, which `docker --env-file` passes as an empty string, so a copied `.env.example` that nobody filled in fails at startup like an unset token.
   - **Format:** at least 32 characters, from the RFC 6750 token set (letters, digits and `-._~+/`, optionally ending in `=`). So no spaces or other whitespace, and no non-ASCII characters. Anything else is a startup error. The README shows how to generate one: `python -c "import secrets; print(secrets.token_urlsafe(32))"` (43 characters, all in that set).
   - **`.env` values are unquoted:** `docker --env-file` keeps quotes as part of the value, while `uv run --env-file` strips them, so a quoted token would differ between the two. `.env.example` says so, and a quote character fails the format check anyway.
 - **When it's required:**
-  - The host isn't one of exactly `127.0.0.1`, `localhost` or `::1`, the same three strings for which the SDK turns on its DNS-rebinding protection (D5), and no token is set: **the server refuses to start**. The error says which variable to set. So `0.0.0.0` in Docker, or another loopback address such as `127.0.0.2`, can't run without a token, and so can't run without either protection.
-  - On loopback without a token, it starts and logs a warning. Any local process can reach it, but no remote one can, and D5 blocks browser pages.
-  - With a token, every host requires it.
+  - **On every host.** With `--transport http` and no token, **the server refuses to start**. The error says which variable to set and how to generate a token.
+  - **Why loopback isn't exempt** (CI review, decided by the owner): an earlier draft let a loopback host start without a token, on the grounds that no remote process can reach it. That only holds without a reverse proxy. nginx's default `proxy_pass http://127.0.0.1:8000`, and Caddy, Traefik or cloudflared set up the same way, forward public traffic with a loopback `Host`. The server can't tell it from local traffic, so it would pass both the D5 check and auth, and the server would be public with no token.
+  - **`--no-auth`, the explicit opt-out:** for a quick local experiment, such as the Inspector, without a token.
+    - It is accepted only when the host is exactly `127.0.0.1`, `localhost` or `::1`, the same three strings for which the SDK turns on its DNS-rebinding protection (D5). Any other host, including `0.0.0.0` in Docker or another loopback address such as `127.0.0.2`, is a startup error.
+    - With `--no-auth` and a token both set, the server refuses to start rather than guess which one was meant.
+    - With `--transport stdio` it is a usage error, since stdio has no auth to turn off.
+    - At startup it logs a warning that auth is off: any program on this machine can call the tools, and so can anything a same-host proxy forwards. The README says never to use it behind a proxy or tunnel.
+    - Turning auth off then has to be typed on purpose. It can't follow from a missing or empty variable.
+  - With a token, every request needs it, on every host.
 - **The check (`http_auth.py`):** a pure ASGI middleware around the whole app.
   - **The only exemption** is an exact match: method `GET` or `HEAD` (Starlette answers `HEAD` for a `GET` route), and a path equal to `/health`. A prefix match would be an auth bypass. So `/health/`, `/healthz`, `/health/x`, `/mcp/`, `OPTIONS /health` and `POST /health` all need the token. Tests pin each one.
   - It only checks `http` scopes. Other scopes, in particular `lifespan`, pass through unchanged: the SDK's app starts its session manager in its lifespan, and without that every request fails.
@@ -108,7 +115,8 @@ Over HTTP, a `file_path` would name a file on the **server's** disk, not the cal
     - `ctx` is `None`: a direct Python call, as in the unit tests, which is local by nature. `file_path` is allowed.
     - `ctx` is present, so the call came through a server: the setting must come from the server's options. If the lifespan context is missing, or isn't the options object, the tool treats `file_path` as **not** allowed. A mis-wired server or an SDK change can then only break local file access, which a stdio test catches at once. It can never open it over HTTP.
     - Tests: an app whose lifespan yields nothing, or something else, rejects `file_path`. The stdio app allows it.
-    - **`ctx=None` must never come from a server.** If an SDK change stopped injecting `ctx`, every server call would look like a direct call and allow `file_path` again. The D7 tests therefore send `file_path` through real HTTP requests to the HTTP app, not through direct calls, and expect the D3 error from all 5 tools. They fail the moment `ctx` stops arriving, as does the CI smoke test.
+    - **`ctx=None` must never come from a server.** If an SDK change stopped injecting `ctx`, every server call would look like a direct call and allow `file_path` again. The D7 tests therefore send `file_path` through real HTTP requests to the HTTP app, not through direct calls, and expect the D3 error from all 5 tools, plus the `output_path`-only `clean_dataset` call. They are in-process tests, so they run on every entry of the test matrix. They fail the moment `ctx` stops arriving, as does the CI smoke test.
+    - **Not chosen: HTTP-only tool wrappers** that always pass `allow_file_path=False`, so that no path depends on `ctx` (CI review). `register(app)` would need a transport parameter, a change to the registration pattern (CLAUDE.md), for a failure the tests above already catch on every run.
   - **Why not a mutable module setting:** it would let one process's tests leak into another's, and it hides which server a tool belongs to.
   - **Checked on mcp 2.3.0** with a probe server (`streamable_http_app(stateless_http=True, json_response=True)` and Starlette's `TestClient`):
     - the lifespan's value reached the tool on every stateless request, and the lifespan ran once, not per request
@@ -142,7 +150,7 @@ Over HTTP, a `file_path` would name a file on the **server's** disk, not the cal
   - **Validation:** each must parse as a positive, finite number (an integer for the row count). `inf`, `nan`, `0`, a negative number and text are invalid.
   - **How an invalid value surfaces:** raising at import would show a bare traceback, before `main()` runs. So instead:
     - `config.py` keeps the default for an invalid variable, and records the problem in `CONFIG_ERRORS`, a list of messages naming the variable and the value.
-    - `server.main()` checks that list before anything else, on both transports. If it isn't empty, it logs each message to stderr through `logging` (never `print()`, per CLAUDE.md) as `data-quality-mcp: invalid DATA_QUALITY_MCP_MAX_ROWS='abc': expected a positive whole number`, and exits with status 2, without serving.
+    - `server.main()` first sets up logging to stderr, so the messages appear on either transport, and then checks that list before anything else. If it isn't empty, it logs each message to stderr through `logging` (never `print()`, per CLAUDE.md) as `data-quality-mcp: invalid DATA_QUALITY_MCP_MAX_ROWS='abc': expected a positive whole number`, and exits with status 2, without serving.
     - Python code that imports the package directly gets the defaults, and the list says why.
   - **Effective overrides are logged at startup:** each variable that is set, and its value (none of them is a secret). So a stale variable left in a Claude Desktop config shows up in the log, rather than silently changing a limit.
   - **Tests:** set the variable, reload `config` with `importlib.reload`, and check `CONFIG_ERRORS` and `main()`'s exit and message. Keyword defaults in core modules are bound when those modules are defined, so a test of the overridden value itself reloads them too. Or it runs the server in a subprocess, which is how the CI smoke test checks it.
@@ -201,10 +209,10 @@ DNS rebinding lets a web page in the user's browser reach a server on `localhost
   - The job has minimal `permissions:` and its action versions are pinned, as in every workflow.
 - **The ruleset:** the new job is a required check, so the owner adds `Docker image` to the `main protection` ruleset's required checks after the implementation PR's first run (CLAUDE.md).
 - **In-process tests in the normal test matrix** (Ubuntu × Python 3.10–3.14, Windows × 3.10 and 3.14). They use Starlette's `TestClient` as a context manager (`with TestClient(app) as client:`), which runs the app's lifespan, so they need no Docker and count toward coverage:
-  - **Auth:** 401 for a missing token, the wrong scheme, a wrong token or a non-ASCII header; 200 for the right token; `/health` open; no token read from the URL.
-  - **Logs:** no token in any log record, from the header or the query string; nothing on stdout.
+  - **Auth:** 401 for a missing token, the wrong scheme, a wrong token or a non-ASCII header; 200 for the right token; `/health` open; no token read from the URL. With `--no-auth` on loopback, 200 without a token, and the startup warning is logged.
+  - **Logs:** no token in any log record, from the header or the query string; nothing on stdout; `/mcp%0Afake` logged as one escaped line.
   - **Nothing on stdout:** startup errors, warnings and the per-request log all go to stderr; only `--help` writes to stdout.
-  - **Startup refusals:** no token (unset, empty or whitespace) on `0.0.0.0` or `127.0.0.2`; a token that is too short or outside the RFC 6750 set; a limit variable that isn't a positive, finite number (`abc`, `0`, `-1`, `inf`, `nan`), which exits with status 2 and the D4 message, on stdio as well.
+  - **Startup refusals:** no token (unset, empty or whitespace) on `127.0.0.1`, `0.0.0.0` or `127.0.0.2`; `--no-auth` on `0.0.0.0` or `127.0.0.2`, together with a token, or with `--transport stdio`; a token that is too short or outside the RFC 6750 set; a limit variable that isn't a positive, finite number (`abc`, `0`, `-1`, `inf`, `nan`), which exits with status 2 and the D4 message, on stdio as well.
   - **`/health`:** the exact-match exemption, and its independence from the allowed-hosts list (D5).
   - **Body cap:** 413 above `MAX_HTTP_REQUEST_MB`, with a `Content-Length` and chunked.
   - **Host checks:** on loopback, a request with a foreign `Host` header is rejected, and `[::1]:8000` is accepted on `::1`. Elsewhere, the allowed-hosts list is applied.
@@ -217,7 +225,7 @@ DNS rebinding lets a web page in the user's browser reach a server on `localhost
 - **VS Code** (`.vscode/mcp.json`) and the **MCP Inspector:** each with its own config example and the same header. They go in `examples/`, next to `claude_desktop_config.json`.
 - **Claude Desktop and claude.ai:** stdio stays the way to use Claude Desktop locally. A claude.ai or Desktop custom connector needs a public HTTPS URL that Anthropic's servers can reach. It also needs OAuth: static request headers are a beta for a limited set of organizations ([connector authentication docs](https://claude.com/docs/connectors/building/authentication)). Both come with D9.
 - **README:**
-  - a "Run over HTTP" section: the token, the command, the clients, TLS, the 413 limit, sizing, and that `file_path` is off over HTTP
+  - a "Run over HTTP" section: the token, the command, the clients, TLS, the 413 limit, sizing, that `file_path` is off over HTTP, and `--no-auth` with its warning about proxies
   - a "Docker" section
   - the trust model updated: over HTTP the caller can only send data, never read the server's files
 - **`.env.example`:** `DATA_QUALITY_MCP_TOKEN=` (empty, with the generation command in a comment), plus the D4 and D5 variables, commented out with their defaults. `.env` is already gitignored; the implementation checks.
