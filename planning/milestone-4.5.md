@@ -29,7 +29,7 @@
 - **Nothing to pay:**
   - Both providers are used on their free tiers, without a payment method.
   - On Render, running out of free hours, bandwidth or build minutes suspends the service, or stops builds, until the next month. It can only be billed if a payment method is on file (D1).
-- **Same image everywhere:** the live server runs the image CI builds and tests. It is configured only through environment variables, so it can move to another host (Cloud Run, D10) without a code change.
+- **Same build everywhere:** the live server is built from the same `Dockerfile` and commit that CI builds and tests (Render rebuilds it, D1; nothing is published). It is configured only through environment variables, so it can move to another host (Cloud Run, D10) without a code change.
 - **Stdio and M4's HTTP modes don't change:**
   - `data-quality-mcp` with no arguments behaves as in 0.5.0.
   - So does `--transport http` with `DATA_QUALITY_MCP_TOKEN` or `--no-auth`.
@@ -81,6 +81,7 @@
   - The service deploys `main` with "After CI Checks Pass" (`autoDeployTrigger: checksPass`): Render deploys a commit only after all its GitHub checks pass.
   - A commit with no checks, such as one whose message contains `[skip ci]` (the #27 case), isn't deployed. The next one is.
   - During the implementation PR, the service tracks the PR's branch instead, so the live checks run before the merge (Verification). After the merge, the owner switches it to `main`.
+  - **On the PR branch, the wait can be long:** `checksPass` waits for every check on the head commit, including the advisory `Claude review`. That review takes up to 20 minutes, and can fail on a usage limit. If it holds a deploy up, the owner starts a manual deploy from the dashboard. On `main` the review doesn't run.
 - **Health check:** `/health`, which M4 already serves without auth. Render routes traffic to a new deploy only once it passes, and restarts an instance after 60 seconds of failures. The `Dockerfile`'s own `HEALTHCHECK` is left for Docker; whether Render reads it doesn't matter.
 - **Proxy and TLS:** Render terminates TLS and forwards plain HTTP to the container.
   - The server builds every URL it advertises from `DATA_QUALITY_MCP_PUBLIC_URL` (D6), never from the request. So it doesn't need uvicorn's proxy headers, and `--forwarded-allow-ips` stays unset.
@@ -119,7 +120,11 @@
   - **A request without a token** to `/mcp` got `401`, with `WWW-Authenticate: Bearer error="invalid_token", error_description="Authentication required", resource_metadata="https://<host>/.well-known/oauth-protected-resource/mcp"`. This is what claude.ai needs to start the OAuth flow.
   - **Unauthenticated routes:** `/health`, a custom route, stayed open. The SDK puts its auth check (`RequireAuthMiddleware`) on `/mcp` only.
   - **Accepted:** the owner's token got 200. Inside the tool, `get_access_token()` returned its subject.
-  - **Refused:** another user's token, a wrong audience, a wrong issuer, an expired token and a token without `sub` each got 401. So did `bearer` in lower case followed by extra spaces, since the SDK strips exactly `Bearer ` (7 characters). Clients send one space, as RFC 6750 says.
+  - **Refused:** another user's token, a wrong audience, a wrong issuer, an expired token and a token without `sub` each got 401.
+  - **The header format:**
+    - **Extra spaces:** a token after more than one space also got 401. The SDK accepts the scheme in any case, but strips exactly 7 characters (`bearer `), so the extra spaces stay in the token. Clients send one space, as RFC 6750 says.
+    - **A difference between modes:** M4's static-token mode accepts several spaces. Both behaviours stay as they are.
+  - **The auth middleware runs on every route,** not just `/mcp`. The SDK installs Starlette's `AuthenticationMiddleware` app-wide, and that middleware only catches `AuthenticationError`. So any other exception from `verify_token` would be a 500, even on `/health` or the metadata route, for any request with a `Bearer` header. Hence the never-raise rule below.
 - **The check, in `http_auth.py`** (no `mcp`):
   - **Decoding:** `jwt.decode` with:
     - `algorithms=["RS256"]`, fixed, so `none` or an HMAC algorithm are never accepted
@@ -127,16 +132,34 @@
     - `audience` = the public `/mcp` URL
     - `options={"require": ["exp", "iat", "iss", "aud", "sub"]}`
     - a 30-second leeway for clock skew
+  - **The leeway doesn't extend `exp`.** After the verifier returns, the SDK itself refuses a token whose `expires_at` has passed, with no leeway, and the wrapper sets `expires_at` to `exp`. So the leeway only helps `iat` and `nbf`. No test expects a token past its `exp` to be accepted.
   - **The owner:** `sub` must equal the owner (D4).
   - **On a refusal:** it returns `None`, and logs one line naming the reason class, e.g. `token refused: InvalidAudienceError` or `token refused: not the owner`, never the token or its claims.
+  - **It never raises:**
+    - Any exception at all, not only `jwt.PyJWTError`, is logged by class, and the token is refused.
+    - The claims the wrapper uses are type-checked before the `AccessToken` is built: `sub` must be a string, `scope` a string if present, and `client_id`/`azp` strings if present. A claim of the wrong type refuses the token.
+    - So a strange token gets a 401 on `/mcp`, and can't turn `/health` into a 500.
+  - **Cheap checks before any key lookup,** on the unverified header and claims:
+    - in this order: the header's `alg` is RS256 and it has a `kid`, then `iss` matches, then `aud`, then `sub` is the owner
+    - the first failure is the reason logged, so `token refused: not the owner` also shows that `iss` and `aud` matched
+    - anything that fails is refused without touching the JWKS
+    - Only a token claiming the owner's ID can trigger a fetch. WorkOS IDs are long and random, and the owner ID is never logged or committed.
+    - These checks only decide whether a fetch is worth making. The full signature check still decides acceptance.
   - WorkOS's guide doesn't name the signing algorithm. The implementation confirms RS256 from a real token's header and from the JWKS. If it differs, the fixed list follows the JWKS, never the token.
 - **The JWKS:** `jwt.PyJWKClient(<issuer>/oauth2/jwks)`, the URL WorkOS documents, or `DATA_QUALITY_MCP_OAUTH_JWKS_URL` if set.
   - **Fetched lazily,** on the first token, never at startup. A sleeping or unreachable AuthKit then can't stop the server from starting or passing its health check.
   - **Cached:** the key set is kept for 5 minutes (PyJWT's default), with a 5-second fetch timeout.
-  - **Refetches are throttled:** a token with an unknown `kid` makes PyJWT refetch the set, at most once per 30 seconds (`cooldown_duration`). Random `kid`s therefore can't turn requests into outbound calls to WorkOS.
+  - **PyJWT's own throttle isn't enough** (Codex and pre-PR review):
+    - **What it does:** an unknown `kid` makes PyJWT refetch the set at most once per 30 seconds (`cooldown_duration`).
+    - **What it misses:** that cooldown only counts from the last *successful* fetch. With an empty or expired cache, PyJWT fetches before it checks the cooldown, so while fetches are failing (AuthKit down, DNS trouble) every token would try again.
+    - **The cost:** each fetch holds PyJWT's client lock for up to the 5-second timeout. The waiting checks sit in worker threads that tool calls also need.
+  - **So the server adds its own fetch gate,** around PyJWT:
+    - **One fetch at a time:** a check that needs a fetch while another is in flight doesn't wait. It refuses its token at once (401).
+    - **Backoff:** after a failed fetch, no fetch is attempted for 30 seconds. Tokens that need one are refused at once in that window, and a single line is logged when the window opens, not one per request.
+    - **After a success,** PyJWT's cache and cooldown apply as usual.
+    - So during an outage, at most one outbound fetch every 30 seconds happens, and no request waits on another's fetch. The owner's client retries after a 401.
   - **The lower bound** in `pyproject.toml` is the first PyJWT release with `cooldown_duration`. The lock has 2.15.1; the implementation checks the changelog.
   - **The fetch blocks,** since PyJWT uses `urllib`. The verifier therefore runs the check in a worker thread (`anyio.to_thread.run_sync`), so it never blocks the event loop.
-  - **A fetch that fails** refuses the token (401) and logs the failure. The client retries.
 - **The wrapper, in `server.py`:** a `TokenVerifier` whose `verify_token` calls the check and returns an `AccessToken` with these fields:
   - `subject` = `sub`
   - `client_id` = the `client_id` claim, or `azp`, or `""` if neither is present
@@ -197,13 +220,21 @@ So `--transport http` has three modes:
   | `DATA_QUALITY_MCP_OAUTH_OWNER` | `user_01H...` | Required in OAuth mode. Non-empty, with no whitespace. |
   | `DATA_QUALITY_MCP_OAUTH_JWKS_URL` | `https://<tenant>.authkit.app/oauth2/jwks` | Optional; the default is the issuer plus `/oauth2/jwks`. `https`. |
 
-- **Plain `http`** is accepted for the issuer, public URL and JWKS only when the host is `localhost` or `127.0.0.1`, for a local OAuth test.
+- **Plain `http`** is accepted for the issuer, public URL and JWKS only when the host is `localhost`, `127.0.0.1` or `[::1]` (M4's loopback names), for a local OAuth test.
+- **Empty means unset,** as for the token in M4: a blank or whitespace-only value counts as not set. So a blank issuer means OAuth mode is off.
 - **A malformed or missing value:** in OAuth mode the server exits with status 2, naming the variable, as for the token.
 - **Without the issuer,** the other three are ignored with a warning, so a half-removed OAuth setup doesn't pass silently.
 - **Allowed hosts:**
-  - In OAuth mode, if `DATA_QUALITY_MCP_ALLOWED_HOSTS` is unset, it defaults to the public URL's host. The SDK's DNS-rebinding check (M4's D5) is then on for the live server without another setting.
-  - Setting the variable explicitly replaces the default, as in M4.
-  - `/health` and the metadata route are outside that check, so Render's health check, which may use another `Host`, keeps working.
+  - **The default:** in OAuth mode, if `DATA_QUALITY_MCP_ALLOWED_HOSTS` is unset, it defaults to the public URL's **netloc**: the host, plus the port when the URL gives one. For `https://dq.onrender.com` that is `dq.onrender.com`; for `http://localhost:8000`, `localhost:8000`.
+    - The SDK compares the `Host` header exactly, port included, so the port must be part of the entry.
+    - With this default, the SDK's DNS-rebinding check (M4's D5) is on for the live server without another setting.
+  - **An explicit value** replaces the default, as in M4.
+  - **Routes outside the check:** `/health` and the metadata route aren't checked, so Render's health check keeps working whatever `Host` it uses.
+  - **`Origin`:** an allowed-hosts list comes with an empty list of allowed origins (M4's `server.py`). So in OAuth mode a request to `/mcp` with an `Origin` header gets 403.
+    - Claude Code and other non-browser clients don't send one.
+    - It isn't known whether claude.ai's backend does. The live check finds out (Verification).
+    - If claude.ai is refused for it, the fallback is a new optional `DATA_QUALITY_MCP_ALLOWED_ORIGINS`, set to `https://claude.ai` on Render. That is a small amendment recorded in **As built**, not an opening of the check.
+    - Browser clients, such as the Inspector's web UI, stay refused. They aren't a use case for the live server.
 - **`.env.example`** gains the four variables, commented out.
 
 ### D7. Fitting the free instance
@@ -224,13 +255,18 @@ So `--transport http` has three modes:
   - **Where:** the image runs locally with `docker run --memory=512m --memory-swap=512m --cpus=0.1`, close to Render's free instance.
   - **What:** each worst case allowed by those limits, one call per fresh container:
     - a CSV at the body cap or the row cap, whichever comes first
-    - a numeric XLSX at the body cap
+    - the largest numeric XLSX within all the caps. With the proposed values that's the row cap, not the body cap: 6 MB of XLSX (what 8 MB of base64 carries) unpacks to about 72 MB, which is over the 60 MB cap and over 100,000 rows.
     - a shared-strings XLSX at the expansion cap
     - `clean_dataset` on the largest CSV, with inline output
   - **The pass rule:** no call is killed for memory, and the peak (VmHWM, as in M4) stays at or under 400 MiB, which leaves headroom below 512.
   - **Time:** each call's time at 0.1 CPU is recorded. If the slowest takes over 60 seconds, the rows or the expansion cap come down until it doesn't, because a client can time a call out.
+    - The numeric XLSX is likely to set the row cap: scaling M4's 21.4 s for 290,000 rows to 100,000 rows at a tenth of the CPU gives about 74 s.
+    - So expect the proposed 100,000 rows to come down.
+  - **Startup:** the time from `docker run` to healthy, under the same caps, is recorded too. At full CPU it was about 5 s. Importing pandas, scipy and the SDK at 0.1 CPU could take much longer. It adds to Render's own wake time (D8).
   - **Recorded:** the final values and figures, in **As built** and `docs/deployment.md`.
-- **Live check:** the largest CSV case also runs once through claude.ai against Render, to confirm the local cap matches the real instance.
+- **Live check:** the largest CSV case also runs once against Render, to confirm the local caps match the real instance.
+  - **Not through claude.ai:** a model would have to write megabytes of `inline_content` itself, far past any output limit.
+  - **A scripted client instead:** the SDK's Streamable HTTP client with its OAuth client provider, which signs in through a localhost callback. The script is a local tool for the owner, kept in `scripts/`, and holds no credentials. It is never run in CI.
 - **Concurrency:** one owner means one call at a time in practice. The server still has no concurrency cap (M4). On the free instance, two large calls at once could exhaust the memory, and Render restarts the instance. The README says so.
 
 ### D8. Cold starts
@@ -248,12 +284,21 @@ So `--transport http` has three modes:
   - **Tokens:** a test RSA key signs the tokens, and the verifier gets that key in place of the JWKS client.
   - **Through the HTTP app** with Starlette's `TestClient`:
     - **Accepted:** the owner's token.
-    - **Refused:** wrong `sub`, wrong `aud`, wrong `iss`, expired, missing `exp`/`iat`/`sub`, `alg: none`, an HS256 token signed with the public key, an unknown `kid`, and a garbage token.
+    - **Refused:** wrong `sub`, wrong `aud`, wrong `iss`, expired, missing `exp`/`iat`/`sub`, `alg: none`, an HS256 token signed with the public key, an unknown `kid`, no `kid`, and a garbage token.
+    - **Wrong claim types:** a list `scope`, a numeric `client_id` and a numeric `sub` each give 401, never 500.
     - **The 401** carries `resource_metadata` with the public URL.
     - **The metadata** document's exact contents.
-    - **Open routes:** `/health` and the metadata route.
-    - **Host checks:** the default allowed host from the public URL, and a foreign `Host` rejected on `/mcp`.
+    - **Open routes:** `/health` and the metadata route, with no header and with a garbage `Authorization: Bearer` header: 200, never 500.
+    - **Host checks:**
+      - the default allowed host taken from the public URL, with and without a port (`http://localhost:8000` must accept `Host: localhost:8000`)
+      - a foreign `Host` rejected on `/mcp`
+      - an `Origin` header rejected on `/mcp`
     - **The request log:** one line, in OAuth mode too, and never the token.
+  - **The fetch gate (D3),** with a fake JWKS client that fails or blocks on demand:
+    - **Repeated failures:** they make one fetch per 30-second window, with an empty cache and with an expired one.
+    - **Concurrency:** a check arriving while a fetch is in flight is refused at once, without waiting.
+    - **Prechecks:** a token that fails one never reaches the client.
+    - **Recovery:** after a success, a token with a known `kid` needs no fetch.
   - **`main()`:**
     - **Mode conflicts:** the token with the issuer, and `--no-auth` with either.
     - **Missing or malformed values:** a missing public URL or owner, `http` on a public host, a path on the issuer, and the issuer with a trailing slash.
@@ -261,12 +306,16 @@ So `--transport http` has three modes:
     - **Startup:** no network call at startup.
   - **The JWKS client:** its timeout and its 30-second cooldown, through PyJWT's settings, with no real fetch.
   - **Stdio and the static-token tests** pass unchanged.
-- **The `Docker image` job** gains a fourth container in OAuth mode. Its issuer is `https://issuer.invalid`, which is never fetched, because the JWKS is lazy. The smoke script checks that:
-  - `/health` is 200
-  - `/mcp` without a token is 401, with `resource_metadata`
-  - the metadata route returns the expected JSON
-  - a made-up bearer token is 401
-  - the log has no token
+- **The `Docker image` job** gains a fourth container in OAuth mode:
+  - **The address:** it publishes host port 8001, since `dq` already uses 8000.
+  - **The settings:** the issuer is `https://issuer.invalid`, the public URL is `http://localhost:8001`, and the owner is a fixed test value.
+  - **No network call:** the issuer is never fetched. The JWKS is lazy, and the made-up bearer token isn't JWT-shaped, so it fails before any lookup.
+  - **The smoke script** gains an `--oauth` mode, which needs no `DATA_QUALITY_MCP_TOKEN` and skips the tool calls. It checks that:
+    - `/health` is 200
+    - `/mcp` without a token is 401, with `resource_metadata` naming `http://localhost:8001/.well-known/oauth-protected-resource/mcp`
+    - the metadata route returns the expected JSON
+    - a made-up bearer token is 401
+    - the log has no token
 - **Render deploys after CI** (`checksPass`), so a commit that fails CI is never deployed.
 - **The ruleset's required checks don't change:** no job is added or renamed.
 
@@ -287,13 +336,18 @@ So `--transport http` has three modes:
   - **claude.ai:** Settings → Connectors → Add custom connector, with the URL `https://<service>.onrender.com/mcp`. Sign in when asked. Auth settings can't be edited after adding a connector, so a change means removing and re-adding it.
   - **Claude Code:** `claude mcp add --transport http data-quality https://<service>.onrender.com/mcp`, then `/mcp` to sign in.
   - **Whether to show the live URL:** the owner decides at implementation. Showing it is harmless, since every request needs the owner's sign-in, and it makes the portfolio checkable. Bots will find it either way.
-  - The "Run over HTTP" section gains the OAuth mode (D5) and its variables (D6).
+  - The "Run over HTTP" section gains the OAuth mode (D5) and its variables (D6). Its line saying a custom connector needs OAuth, "which come with the later deployment", points to the new section instead.
 - **`docs/architecture.md`:** the auth modes and the OAuth flow (client, server, AuthKit).
 - **`planning/project-overview.md`:**
-  - the roadmap: "Later: Live Deployment and OAuth" becomes Milestone 4.5
-  - the stack table's auth and hosting rows
-  - the repository structure: `render.yaml`, `docs/deployment.md`
-  - the auth paragraph that says OAuth comes later
+  - **The roadmap:** "Later: Live Deployment and OAuth" becomes Milestone 4.5. Its text drops "a published image" (D1).
+  - **The stack table:**
+    - the transport row's "behind a bearer token" becomes "behind a bearer token or OAuth"
+    - a new hosting row (Render free, WorkOS AuthKit)
+  - **The diagram's transport label:** the same change, bearer token or OAuth.
+  - **The repository structure:**
+    - the `http_auth.py` description gains the JWT check
+    - new entries for `render.yaml`, `docs/deployment.md` and the scripted OAuth client (D7)
+  - **The CI table's `build.yml` row:** gains the OAuth-mode container.
 
 ---
 
@@ -309,7 +363,9 @@ You create and own every account. I never see a password, token or key. Labels i
    2. Create the service from the Blueprint (`render.yaml`) on the PR's branch. Pick the service name: it sets the URL `https://<name>.onrender.com`.
    3. When asked for the `sync: false` values, enter the issuer, `https://<name>.onrender.com` as the public URL, and a placeholder owner such as `pending`. The service starts, and refuses every token until step 4.
 3. **WorkOS, again:** add `https://<name>.onrender.com/mcp` as a **Resource Indicator**.
-4. **Sign up once** through claude.ai's connector (README steps). The server refuses you, because the owner is still the placeholder. Then copy your **user ID** from WorkOS → Users, and set it as `DATA_QUALITY_MCP_OAUTH_OWNER` in Render. Render restarts the service.
+4. **Sign up once** through claude.ai's connector (README steps). The server refuses you, because the owner is still the placeholder.
+   1. **Check the reason** in Render's log: it must read `token refused: not the owner`. That shows the issuer and the audience already match (D3's check order). A different reason, such as an audience error, means step 3's Resource Indicator doesn't match, so fix that first.
+   2. **Copy your user ID** from WorkOS → Users, and set it as `DATA_QUALITY_MCP_OAUTH_OWNER` in Render. Render restarts the service.
 5. **Connect again** from claude.ai, then from Claude Code. Both should now work.
 6. **After the merge,** switch the Render service's branch to `main`.
 
@@ -328,7 +384,8 @@ Merging this spec also approves these `CLAUDE.md` changes, made in the implement
 
 1. **`http_auth.py` (D3, D4, D5, D6):**
    - the OAuth settings reader and its validation
-   - the JWT check with the owner rule, and the JWKS client settings
+   - the JWT check with its prechecks, the owner rule and the never-raise rule
+   - the JWKS client settings and the fetch gate
    - mode resolution, extended to three modes
    - the request-log middleware, with the static check skipped in OAuth mode
 2. **`server.py` (D3, D5, D6):**
@@ -338,7 +395,9 @@ Merging this spec also approves these `CLAUDE.md` changes, made in the implement
 3. **`pyproject.toml`:** `pyjwt[crypto]` with its lower bound (D3). `uv lock`, then confirm only the root entry changed.
 4. **Tests (D9):** the in-process OAuth tests, the `main()` cases, and the architecture test's `jwt` entry.
 5. **CI (D9):** the OAuth-mode container in the `Docker image` job, and the smoke script's OAuth checks.
-6. **Sizing (D7):** the capped-container measurements, then the limits in `render.yaml`.
+6. **Sizing (D7):**
+   - the capped-container measurements, startup time included, then the limits in `render.yaml`
+   - the scripted OAuth client in `scripts/`, for the live check
 7. **`render.yaml` (D1).**
 8. **Docs (D10):**
    - `docs/deployment.md`, the README, `docs/architecture.md` and `.env.example`
@@ -355,10 +414,13 @@ Merging this spec also approves these `CLAUDE.md` changes, made in the implement
   - `/health` answers, and the metadata at `/.well-known/oauth-protected-resource/mcp` has the right `resource` and `authorization_servers`.
   - **claude.ai** (custom connector): sign-in completes, the fixture's inline profile scores 77, as over stdio, and a `file_path` gets M4's D3 error.
   - **Claude Code** with OAuth: the same profile.
-  - **Refusals:** before the owner is set (step 4), your own sign-in is refused, which tests D4 against a real token. A request with no token, and one with a made-up token, get 401.
+  - **Refusals:**
+    - Before the owner is set (step 4), your own sign-in is refused with the log reason `not the owner`. That tests D4 against a real token, with the issuer and the audience already matching.
+    - A request with no token, and one with a made-up token, get 401.
+  - **`Origin`:** whether claude.ai's requests carry one, seen from whether the connector works with D6's allowed hosts. If it's refused for that, the D6 fallback applies.
   - **The logs** on Render show no token.
   - **A cold start:** connect after the service has slept, and record what happens.
-  - **The largest D7 case** through claude.ai.
+  - **The largest D7 case,** through the scripted client (D7), not claude.ai.
   - **Recorded in As built:** which registration Claude used (CIMD or DCR), the token's claim names and algorithm (not their values), whether its `iss` matches the AuthKit domain exactly, and the times.
 - **Stdio:** Claude Desktop, after `uv tool install --editable . --reinstall`, gives the same profile as before.
 - **Pre-PR review** for the implementation PR, then the CI review under the stop rule.
@@ -373,6 +435,8 @@ Merging this spec also approves these `CLAUDE.md` changes, made in the implement
 - **A proxy for the authorization server's metadata** (D3).
 - **A keep-alive pinger** (D8).
 - **Rate limiting and a concurrency cap:**
-  - Unauthenticated requests get a 401 without the body being read, and their cost is a JWT decode at most. JWKS refetches are throttled (D3).
+  - Unauthenticated requests get a 401 without the body being read.
+  - A token that fails D3's prechecks costs an unverified decode and never reaches the JWKS.
+  - Outbound fetches are gated to one at a time, with a 30-second backoff after a failure (D3).
   - The only caller who gets through is the owner. Revisit both if the server ever has more than one user.
 - **M5** (polish and docs) keeps its scope.
