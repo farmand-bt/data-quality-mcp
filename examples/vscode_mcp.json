@@ -1,0 +1,19 @@
+{
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "data-quality-token",
+      "description": "Bearer token of the data quality MCP server (DATA_QUALITY_MCP_TOKEN)",
+      "password": true
+    }
+  ],
+  "servers": {
+    "dataQuality": {
+      "type": "http",
+      "url": "http://localhost:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer ${input:data-quality-token}"
+      }
+    }
+  }
+}

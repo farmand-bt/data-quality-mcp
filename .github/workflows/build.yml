@@ -38,4 +38,62 @@ jobs:
           create_server()
           "
 
-  # Docker image build is added in Milestone 4.
+  # Build the image and smoke-test it over HTTP (planning/milestone-4.md, D7).
+  # Nothing is pushed.
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the image
+        run: docker build -t data-quality-mcp:ci .
+
+      - name: Start it with a random token
+        run: |
+          token=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+          echo "::add-mask::$token"
+          echo "DATA_QUALITY_MCP_TOKEN=$token" >> "$GITHUB_ENV"
+          docker run -d --name dq -e DATA_QUALITY_MCP_TOKEN="$token" \
+            -p 8000:8000 data-quality-mcp:ci
+          docker run -d --name dq-hosts -e DATA_QUALITY_MCP_TOKEN="$token" \
+            -e DATA_QUALITY_MCP_ALLOWED_HOSTS=example.com data-quality-mcp:ci
+
+      - name: Wait until both containers are healthy
+        run: |
+          for name in dq dq-hosts; do
+            for _ in $(seq 1 60); do
+              status=$(docker inspect -f '{{.State.Health.Status}}' "$name")
+              [ "$status" = healthy ] && break
+              sleep 1
+            done
+            echo "$name: $status"
+            [ "$status" = healthy ] || { docker logs "$name"; exit 1; }
+          done
+
+      - name: Smoke-test over HTTP
+        run: python3 scripts/docker_smoke_test.py http://127.0.0.1:8000
+
+      - name: The log never contains the token
+        run: |
+          docker logs dq > dq.log 2>&1
+          if grep -qF "$DATA_QUALITY_MCP_TOKEN" dq.log; then
+            echo "The token appears in the container log"; exit 1
+          fi
+          grep -F "'POST' '/mcp' 200" dq.log
+
+      - name: Without a token the container refuses to start
+        run: |
+          status=0
+          docker run --rm data-quality-mcp:ci > out.log 2> err.log || status=$?
+          cat err.log
+          if [ "$status" -ne 2 ]; then echo "exit status $status, not 2"; exit 1; fi
+          grep -q DATA_QUALITY_MCP_TOKEN err.log
+          if [ -s out.log ]; then echo "stdout isn't empty"; exit 1; fi
+
+      - name: Container logs
+        if: failure()
+        run: docker logs dq; docker logs dq-hosts

@@ -2,11 +2,13 @@
 
 import json
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pandas as pd
 import pytest
 from mcp import Client, StdioServerParameters
+from mcp.server import MCPServer
 
 from data_quality_mcp.profiler_core.schema import (
     CleaningResult,
@@ -16,6 +18,8 @@ from data_quality_mcp.profiler_core.schema import (
     OutlierResult,
 )
 from data_quality_mcp.server import create_server
+from data_quality_mcp.tools import cleaning_tools, profiling_tools
+from data_quality_mcp.tools.options import ServerOptions, file_path_allowed
 from data_quality_mcp.tools.resources import QUALITY_SCORE_URI, REPORT_SCHEMA_URI
 
 pytestmark = pytest.mark.anyio
@@ -376,6 +380,59 @@ async def test_clean_dataset_schema_rejects_json_null_keep(client, messy_copy: P
     )
     assert result.is_error is True  # "none" is a string, not JSON null
     assert [p.name for p in messy_copy.parent.iterdir()] == ["messy_sample.csv"]
+
+
+# --- file access switch (milestone-4.md, D3) ---
+
+
+def _server_with_lifespan(value) -> MCPServer:
+    @asynccontextmanager
+    async def lifespan(_app):
+        yield value
+
+    app = MCPServer("probe", lifespan=lifespan)
+    profiling_tools.register(app)
+    cleaning_tools.register(app)
+    return app
+
+
+@pytest.mark.parametrize(
+    "value",
+    [{}, None, {"allow_file_path": True}, ServerOptions(allow_file_path=False)],
+    ids=["empty", "none", "dict", "off"],
+)
+async def test_a_server_without_its_options_refuses_file_path(messy_path: Path, value):
+    # Fail closed: a mis-wired server can only break local file access
+    async with Client(_server_with_lifespan(value)) as c:
+        profiled = await c.call_tool("profile_dataset", {"file_path": str(messy_path)})
+        cleaned = await c.call_tool(
+            "clean_dataset",
+            {"steps": [{"action": "remove_duplicates"}], "output_path": "x.csv"},
+        )
+    for result in (profiled, cleaned):
+        assert result.is_error is True
+        assert "can't read or write files" in result.content[0].text
+
+
+def test_a_direct_call_without_a_context_allows_file_path(messy_path: Path):
+    report = profiling_tools.profile_dataset(file_path=str(messy_path))
+    assert report["dataset"]["rows"] == 520
+
+
+def test_a_context_outside_a_request_refuses_file_path():
+    class OutsideRequest:
+        @property
+        def request_context(self):
+            raise ValueError("Context is not available outside of a request")
+
+    assert file_path_allowed(OutsideRequest()) is False
+
+
+async def test_the_stdio_server_allows_file_path(client, messy_path: Path):
+    # The fixture's create_server() is the stdio server: its lifespan yields the
+    # options, so file_path works (as every test above shows)
+    result = await client.call_tool("profile_dataset", {"file_path": str(messy_path)})
+    assert result.is_error is False
 
 
 # --- resources ---

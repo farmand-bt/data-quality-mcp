@@ -1,6 +1,6 @@
 # Milestone 4: Remote-Ready Server (HTTP, Docker, Bearer Auth)
 
-> **Status: proposed.** This spec is reviewed and merged before any implementation.
+> **Status: complete (0.5.0).** The spec was approved in #25 and implemented on `feat/milestone-4-http`. See **As built** for figures and small differences.
 > Shared context (architecture, report schema, design decisions) is in [project-overview.md](project-overview.md). Where this spec changes a decision recorded there (the roadmap, D9; Dual Input Mode, D3; Resource Limits, D4), **this spec wins** until the implementation PR updates the overview. The previous milestone is [milestone-3.5.md](milestone-3.5.md).
 
 **Goal:** Let the server run as a network service, not only as a local stdio process:
@@ -296,6 +296,69 @@ Merging this spec also approves these `CLAUDE.md` changes, made in the implement
 - **Docker:** CI's `Docker image` job. Docker isn't installed on this machine, so the image is first built in CI. A local build is optional, if you install Docker Desktop.
 - **Stdio:** Claude Desktop, after `uv tool install --editable . --reinstall`, gives the same profile as before.
 - **Pre-PR review** for the implementation PR, then the CI review under the stop rule.
+
+## As built (0.5.0)
+
+**Layer boundary:**
+- **The core:** gained only the `allow_file_path` keyword (`load_input`, `load_data`, `run_cleaning`) and `FilePathNotAllowedError`.
+- **`config.py`:** uses `os` and `math` only.
+- **Where the SDK lives:** `tools/options.py` holds the options, the lifespan and the `ctx` lookup. `server.py` holds the command line, the HTTP app and uvicorn.
+- **`http_auth.py`:** imports Starlette and the standard library only.
+- **`test_architecture.py`:** enforces the new import lists, and a test checks that its matcher catches forbidden imports.
+
+**Tests:**
+- **Count:** 763 in all, 605 at 0.4.3, on Python 3.12 with pandas 3 and on 3.10 with pandas 2.3.3. Coverage is 98%.
+- **New test files:** `test_http.py`, which sends real HTTP requests through the whole app with Starlette's `TestClient`, and `test_server_main.py`, which covers startup and the overrides.
+- **Stdio:** the existing tool tests pass unmodified.
+
+**Checked end to end:**
+- **The SDK's own client:** the Streamable HTTP client, with the header, against `make run-http`, with a `.env` saved with CRLF line endings.
+  - the fixture's inline profile scores 77, as over stdio
+  - `file_path` gets the D3 error
+  - the prompt has the remote wording
+  - stdout stays empty, and the token never appears in the log
+- **The image, locally (Docker Desktop 4.98, engine 29.9.2):**
+  - it is healthy in about 5 s
+  - the smoke script passes
+  - it runs as uid 10001
+  - without a token it exits with status 2 and an empty stdout
+  - with `DATA_QUALITY_MCP_ALLOWED_HOSTS=example.com` it is still healthy
+  - **MCP Inspector 2.12.0:** `--cli` lists the 5 tools, both with `examples/inspector_config.json` (`"type": "http"`) and with the README's `--transport http --server-url ... --header ...` flags; a wrong token exits with status 3 (auth required)
+  - `docker --env-file` drops a trailing `\r` itself; the server strips the token anyway, for `uv run --env-file`
+
+**Sizing:** peak memory of the server process (VmHWM), in the image, one `profile_dataset` call per fresh container:
+
+| Input | Body | Time | Peak |
+|---|---|---|---|
+| Idle server | - | - | 168 MiB |
+| CSV, 302,513 rows × 8 columns (16.1 MB) | 15.4 MiB | 1.7 s | 345 MiB |
+| XLSX, 290,000 rows × 14 small integers (11.5 MB, unpacks to 139 MB) | 14.7 MiB | 21.4 s | 435 MiB |
+| XLSX, 105,000 distinct 1.8 KB strings (2.2 MB, unpacks to 200.5 MB) | 2.9 MiB | 15.3 s | 603 MiB |
+| stdio: CSV, 499,000 rows × 12 columns (46 MB), by `file_path` | - | 6.3 s | 501 MiB |
+
+- **The worst case** is the shared-strings XLSX near the expansion cap, as M3's D2 expected.
+- **Numeric XLSX can't reach the cap:** openpyxl's numeric cells compress about 12×, so an XLSX that fits the body cap unpacks to at most about 140 MB.
+- **Recommendation:** about 1 GiB for one call at a time, as the README says. Concurrent calls add up.
+
+**Image:**
+- **Pins:** `python:3.13-slim` (Python 3.13.18) and `uv` 0.13.5, both pinned by digest.
+- **Size:** 637 MB, of which the venv is 341 MB (pandas, numpy, scipy, openpyxl, and `mcp[cli]` with its CLI dependencies).
+- **Health check:** `--start-interval=2s` during the start period, so a fresh container reports healthy within seconds rather than after the first 30 s interval.
+
+**Differences from the spec:**
+- **Stated limits in the tool descriptions:** they are formatted from `config`: file size and rows in the input help, and the inline output limit in `clean_dataset`. An override (D4) would otherwise leave the agent reading wrong numbers. This was a follow-up candidate from 0.4.3, done here for the overridable limits only. The other hardcoded figures (50 columns, 0.9 and so on) stay as they are.
+- **Plain one-line logs:** `MCPServer` installs a rich log handler on the root logger when it is created, which made `main()`'s `basicConfig` a no-op and wrapped one record over several lines. `main()` now swaps that handler for a plain stderr one, on both transports, so a request is one line, as D1 intends. Other handlers, such as pytest's, are left alone.
+- **Order in `main()`:** the command line is parsed before `CONFIG_ERRORS` is checked (CI review), so `--help` still works with a bad variable. D4 put the check first.
+- **Exit status:** every startup refusal exits with status 2: a bad limit, a token problem, or a `--no-auth` misuse (an argparse usage error, which uses 2 too).
+- **`DATA_QUALITY_MCP_ALLOWED_HOSTS` on loopback:** when it is set, it replaces the SDK's loopback default there too, rather than being ignored.
+- **Escaping:** the logged method is escaped with `%r` as well as the path.
+- **WebSockets are refused** (pre-PR review): the middleware passes only `lifespan` and `http` scopes to the app, and closes a WebSocket with code 1008, with or without a token. Nothing serves WebSockets today, so this only keeps a later SDK route from getting around the token.
+- **Validation edge cases** (pre-PR review): a whole number too large for a float (e.g. 400 digits) is an invalid limit rather than an import-time `OverflowError`, and the request cap is at least one byte, since the SDK rejects 0.
+- **Remote errors in the tool descriptions:** each tool's Errors part, and the input help, say that a remote server refuses `file_path`, so send `inline_content`. The argument descriptions are unchanged (D3).
+- **Limits as the agent reads them:** `config.format_limit` writes "500,000" or "0.5", never "1e+06".
+- **The CI job also runs a third container without a token,** and checks that it exits with status 2, names the variable and writes nothing to stdout.
+- **`.dockerignore`** also leaves out `docs/`, `examples/`, `scripts/` and `.github/`, which the image doesn't need.
+- **The lock:** the local `uv` (0.11.28) would have rewritten `uv.lock` in an older format (revision 3), so the lock was regenerated with a current `uv` (0.13.7, through `uvx`). The diff is only the version and the two new direct dependencies.
 
 ## Out of scope
 

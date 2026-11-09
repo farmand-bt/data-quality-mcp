@@ -10,9 +10,11 @@ from collections.abc import Callable
 from typing import TypeVar
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
+from data_quality_mcp import config
 from data_quality_mcp.profiler_core import DataQualityError
 from data_quality_mcp.profiler_core.loader import load_input
 from data_quality_mcp.profiler_core.report import (
@@ -28,16 +30,19 @@ from data_quality_mcp.profiler_core.schema import (
     OutlierResult,
 )
 from data_quality_mcp.tools.inputs import FilenameHint, FilePath, InlineContent
+from data_quality_mcp.tools.options import file_path_allowed
 
 T = TypeVar("T")
 
 _READ_ONLY = ToolAnnotations(read_only_hint=True, open_world_hint=False)
 
-_INPUT_HELP = """Input: either file_path (an absolute path; relative paths resolve
+_INPUT_HELP = f"""Input: either file_path (an absolute path; relative paths resolve
     against the server's working directory, which is usually not what you expect) or
     inline_content plus filename_hint (CSV as plain text, .xlsx as base64; for
     small data). Supported formats: .csv (comma- or semicolon-separated) and
-    .xlsx (first sheet). Limits: 50 MB and 500,000 rows."""
+    .xlsx (first sheet). Limits: {config.format_limit(config.MAX_FILE_SIZE_MB)} MB and
+    {config.format_limit(config.MAX_ROWS)} rows. A remote server can't read files:
+    it refuses file_path, so send inline_content."""
 
 
 def _run(
@@ -45,11 +50,17 @@ def _run(
     inline_content: str | None,
     filename_hint: str | None,
     build: Callable[..., T],
+    ctx: Context | None,
 ) -> T:
     """Load the input and pass it to a core report builder, mapping domain
     errors to ToolError so the agent sees an actionable message."""
     try:
-        loaded = load_input(file_path, inline_content, filename_hint)
+        loaded = load_input(
+            file_path,
+            inline_content,
+            filename_hint,
+            allow_file_path=file_path_allowed(ctx),
+        )
         return build(
             loaded.df, loaded.name, loaded.source, input_format=loaded.extension
         )
@@ -61,6 +72,7 @@ def profile_dataset(
     file_path: FilePath = None,
     inline_content: InlineContent = None,
     filename_hint: FilenameHint = None,
+    ctx: Context | None = None,
 ) -> DatasetReport:
     """Profile a tabular dataset and return a full, structured data quality report.
 
@@ -118,15 +130,17 @@ def profile_dataset(
     entries (indices_truncated says when); counts and percentages are exact.
 
     Errors: the message says what to fix, e.g. file not found (check the path is
-    absolute), unsupported file type, file too large, or unparseable content.
+    absolute), unsupported file type, file too large, unparseable content, or
+    a remote server that can't read files (send inline_content instead).
     """
-    return _run(file_path, inline_content, filename_hint, generate_report)
+    return _run(file_path, inline_content, filename_hint, generate_report, ctx)
 
 
 def detect_outliers(
     file_path: FilePath = None,
     inline_content: InlineContent = None,
     filename_hint: FilenameHint = None,
+    ctx: Context | None = None,
 ) -> OutlierResult:
     """Find outliers in every numeric column of a CSV or Excel dataset.
 
@@ -165,15 +179,17 @@ def detect_outliers(
     sorted and capped at 50; indices_truncated is true when a list was cut.
 
     {input_help}
-    Errors explain what to fix (e.g. use an absolute path).
+    Errors explain what to fix (e.g. use an absolute path, or send
+    inline_content to a remote server, which can't read files).
     """
-    return _run(file_path, inline_content, filename_hint, outlier_report)
+    return _run(file_path, inline_content, filename_hint, outlier_report, ctx)
 
 
 def find_duplicates(
     file_path: FilePath = None,
     inline_content: InlineContent = None,
     filename_hint: FilenameHint = None,
+    ctx: Context | None = None,
 ) -> DuplicateResult:
     """Find exact and near-duplicate rows, and repeated IDs, in a CSV or Excel
     dataset.
@@ -208,15 +224,17 @@ def find_duplicates(
     capped at 50; indices_truncated is true when a list was cut.
 
     {input_help}
-    Errors explain what to fix (e.g. use an absolute path).
+    Errors explain what to fix (e.g. use an absolute path, or send
+    inline_content to a remote server, which can't read files).
     """
-    return _run(file_path, inline_content, filename_hint, duplicate_report)
+    return _run(file_path, inline_content, filename_hint, duplicate_report, ctx)
 
 
 def analyze_correlations(
     file_path: FilePath = None,
     inline_content: InlineContent = None,
     filename_hint: FilenameHint = None,
+    ctx: Context | None = None,
 ) -> CorrelationResult:
     """Measure correlations between columns of a CSV or Excel dataset.
 
@@ -236,9 +254,10 @@ def analyze_correlations(
       with col_a, col_b, method (pearson or cramers_v) and value.
 
     {input_help}
-    Errors explain what to fix (e.g. use an absolute path).
+    Errors explain what to fix (e.g. use an absolute path, or send
+    inline_content to a remote server, which can't read files).
     """
-    return _run(file_path, inline_content, filename_hint, correlation_report)
+    return _run(file_path, inline_content, filename_hint, correlation_report, ctx)
 
 
 for _tool in (profile_dataset, detect_outliers, find_duplicates, analyze_correlations):

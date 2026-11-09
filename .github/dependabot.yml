@@ -24,3 +24,15 @@ updates:
         patterns: ["*"]
     commit-message:
       prefix: "ci"
+
+  # The Dockerfile's base images (python, uv), pinned by digest
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      docker-images:
+        patterns: ["*"]
+    commit-message:
+      prefix: "build"

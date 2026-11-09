@@ -10,6 +10,7 @@ from data_quality_mcp.profiler_core import loader
 from data_quality_mcp.profiler_core.exceptions import (
     DataFileNotFoundError,
     DataParseError,
+    FilePathNotAllowedError,
     FileTooLargeError,
     InvalidInputError,
     TooManyRowsError,
@@ -314,3 +315,36 @@ def test_xlsx_uncompressed_limit(tmp_path: Path):
 def test_real_xlsx_passes_the_expansion_checks(tmp_path: Path):
     raw = _xlsx_bytes(tmp_path, pd.DataFrame({"a": range(100)}))
     assert len(load_data(inline_content=_b64(raw), filename_hint="d.xlsx")) == 100
+
+
+# --- file access switch (milestone-4.md, D3) ---
+
+
+@pytest.mark.parametrize("loader_fn", [load_data, load_input])
+def test_file_path_off_is_rejected_before_any_filesystem_check(
+    monkeypatch, tmp_path: Path, loader_fn
+):
+    def spy(*args, **kwargs):
+        raise AssertionError("check_local_path was called")
+
+    monkeypatch.setattr(loader, "check_local_path", spy)
+    for path in (tmp_path / "missing.csv", r"\\server\share\x.csv"):
+        with pytest.raises(FilePathNotAllowedError, match="inline_content"):
+            loader_fn(str(path), allow_file_path=False)
+
+
+def test_file_path_off_still_loads_inline_content():
+    df = load_data(
+        inline_content="a\n1\n", filename_hint="t.csv", allow_file_path=False
+    )
+    assert df["a"].tolist() == [1]
+
+
+def test_file_path_off_wins_over_the_both_inputs_error(tmp_path: Path):
+    with pytest.raises(FilePathNotAllowedError):
+        load_data(
+            str(tmp_path / "x.csv"),
+            "a\n1\n",
+            "t.csv",
+            allow_file_path=False,
+        )

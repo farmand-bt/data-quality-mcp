@@ -5,7 +5,7 @@ Data Quality MCP Server: an MCP server that exposes deterministic dataset profil
 ## Invariants (apply to every milestone)
 
 ### Layer boundary (most important)
-- `profiler_core/`, `cleaner_core/`, and `config.py` are pure Python and **never import `mcp`**. Only `tools/` and `server.py` may touch the MCP SDK.
+- `profiler_core/`, `cleaner_core/`, and `config.py` are pure Python and **never import the MCP SDK (`mcp`, `mcp_types`) or a web stack (`starlette`, `uvicorn`, `httpx2`, `sse_starlette`)**. Only `tools/` and `server.py` may touch the MCP SDK. `http_auth.py` uses Starlette but not the SDK.
 - `tests/test_architecture.py` enforces this. Never weaken, skip, or work around it.
 - Registration pattern: each `tools/*.py` module defines plain functions plus `register(app: MCPServer) -> None` (MCP SDK v2: `from mcp.server import MCPServer`; v1's `FastMCP` no longer exists). `server.py` creates the app and calls each `register(app)`. Tool modules never import a global app from `server.py`.
 - Tools are thin adapters: parse args, call the core, shape the response. If a tool function has real logic in it, that logic belongs in the core.
@@ -22,10 +22,12 @@ Data Quality MCP Server: an MCP server that exposes deterministic dataset profil
 
 ### stdio hygiene
 - No `print()` anywhere in `src/`. Over stdio, stdout is the JSON-RPC channel. Log to stderr with the `logging` module.
+- Over HTTP, logs go to stderr too, and never include the token or request bodies.
 
 ### Configuration
 - Defaults live in `config.py`. Core functions take thresholds and limits as keyword parameters that default to the config values, rather than reading globals deep inside the logic.
 - Size and row limits are always enforced in the loader.
+- A few limits can be overridden by `DATA_QUALITY_MCP_*` environment variables. They are read and validated in `config.py` only (milestone-4.md, D4).
 
 ### Behavior
 - No LLM calls anywhere. The server is deterministic tooling.

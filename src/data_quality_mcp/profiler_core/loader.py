@@ -20,6 +20,7 @@ from data_quality_mcp import config
 from data_quality_mcp.profiler_core.exceptions import (
     DataFileNotFoundError,
     DataParseError,
+    FilePathNotAllowedError,
     FileTooLargeError,
     InvalidInputError,
     TooManyRowsError,
@@ -56,6 +57,7 @@ def load_input(
     max_xlsx_uncompressed_mb: float = config.MAX_XLSX_UNCOMPRESSED_MB,
     max_xlsx_entries: int = config.MAX_XLSX_ENTRIES,
     allow_network_paths: bool = config.ALLOW_NETWORK_PATHS,
+    allow_file_path: bool = config.ALLOW_FILE_PATH,
 ) -> LoadedInput:
     """`load_data`, plus the dataset's name, source and format.
 
@@ -71,6 +73,7 @@ def load_input(
         max_xlsx_uncompressed_mb=max_xlsx_uncompressed_mb,
         max_xlsx_entries=max_xlsx_entries,
         allow_network_paths=allow_network_paths,
+        allow_file_path=allow_file_path,
     )
     if inline_content is not None:
         name = _basename(str(filename_hint))
@@ -89,6 +92,7 @@ def load_data(
     max_xlsx_uncompressed_mb: float = config.MAX_XLSX_UNCOMPRESSED_MB,
     max_xlsx_entries: int = config.MAX_XLSX_ENTRIES,
     allow_network_paths: bool = config.ALLOW_NETWORK_PATHS,
+    allow_file_path: bool = config.ALLOW_FILE_PATH,
 ) -> pd.DataFrame:
     """Load a CSV or XLSX dataset into a DataFrame.
 
@@ -104,11 +108,16 @@ def load_data(
         max_xlsx_uncompressed_mb, max_xlsx_entries: Reject XLSX files whose
             zip expands to more than this, or has more entries.
         allow_network_paths: Accept UNC and device paths on Windows.
+        allow_file_path: Accept `file_path` at all. When False, a path is
+            rejected before anything touches the filesystem.
 
     Raises:
-        InvalidInputError, DataFileNotFoundError, UnsupportedFormatError,
-        FileTooLargeError, TooManyRowsError, DataParseError.
+        FilePathNotAllowedError, InvalidInputError, DataFileNotFoundError,
+        UnsupportedFormatError, FileTooLargeError, TooManyRowsError,
+        DataParseError.
     """
+    if file_path is not None and not allow_file_path:
+        raise FilePathNotAllowedError()
     if (file_path is None) == (inline_content is None):
         raise InvalidInputError(
             "Provide exactly one of 'file_path' or 'inline_content', not "

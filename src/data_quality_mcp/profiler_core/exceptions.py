@@ -40,3 +40,17 @@ class OutputExistsError(DataQualityError):
 
 class OutputWriteError(DataQualityError):
     """The cleaned output could not be written (no partial file is left)."""
+
+
+FILE_PATH_NOT_ALLOWED = (
+    "Over HTTP this server can't read or write files on its own disk. Send the "
+    "data itself: inline_content with the file's contents (CSV as text, .xlsx as "
+    "base64) and filename_hint with its name."
+)
+
+
+class FilePathNotAllowedError(DataQualityError):
+    """A file path was given where file access is off (over HTTP, M4 D3)."""
+
+    def __init__(self, message: str = FILE_PATH_NOT_ALLOWED) -> None:
+        super().__init__(message)
