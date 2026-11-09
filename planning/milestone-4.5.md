@@ -143,23 +143,25 @@
     - in this order: the header's `alg` is RS256 and it has a `kid`, then `iss` matches, then `aud`, then `sub` is the owner
     - the first failure is the reason logged, so `token refused: not the owner` also shows that `iss` and `aud` matched
     - anything that fails is refused without touching the JWKS
-    - Only a token claiming the owner's ID can trigger a fetch. WorkOS IDs are long and random, and the owner ID is never logged or committed.
-    - These checks only decide whether a fetch is worth making. The full signature check still decides acceptance.
+    - **Only a filter, not a security boundary** (CI review): the owner ID isn't a secret (D4), so anyone who knows it can get past the prechecks with a forged token. What limits outbound fetches is the key cache below, not the ID. The full signature check still decides acceptance.
   - WorkOS's guide doesn't name the signing algorithm. The implementation confirms RS256 from a real token's header and from the JWKS. If it differs, the fixed list follows the JWKS, never the token.
-- **The JWKS:** `jwt.PyJWKClient(<issuer>/oauth2/jwks)`, the URL WorkOS documents, or `DATA_QUALITY_MCP_OAUTH_JWKS_URL` if set.
+- **The JWKS:** fetched from `<issuer>/oauth2/jwks`, the URL WorkOS documents, or from `DATA_QUALITY_MCP_OAUTH_JWKS_URL` if set. PyJWT parses the set (`PyJWKSet`), and the server keeps it in a small key cache of its own.
   - **Fetched lazily,** on the first token, never at startup. A sleeping or unreachable AuthKit then can't stop the server from starting or passing its health check.
-  - **Cached:** the key set is kept for 5 minutes (PyJWT's default), with a 5-second fetch timeout.
-  - **PyJWT's own throttle isn't enough** (Codex and pre-PR review):
-    - **What it does:** an unknown `kid` makes PyJWT refetch the set at most once per 30 seconds (`cooldown_duration`).
-    - **What it misses:** that cooldown only counts from the last *successful* fetch. With an empty or expired cache, PyJWT fetches before it checks the cooldown, so while fetches are failing (AuthKit down, DNS trouble) every token would try again.
-    - **The cost:** each fetch holds PyJWT's client lock for up to the 5-second timeout. The waiting checks sit in worker threads that tool calls also need.
-  - **So the server adds its own fetch gate,** around PyJWT:
-    - **One fetch at a time:** a check that needs a fetch while another is in flight doesn't wait. It refuses its token at once (401).
-    - **Backoff:** after a failed fetch, no fetch is attempted for 30 seconds. Tokens that need one are refused at once in that window, and a single line is logged when the window opens, not one per request.
-    - **After a success,** PyJWT's cache and cooldown apply as usual.
-    - So during an outage, at most one outbound fetch every 30 seconds happens, and no request waits on another's fetch. The owner's client retries after a 401.
-  - **The lower bound** in `pyproject.toml` is the first PyJWT release with `cooldown_duration`. The lock has 2.15.1; the implementation checks the changelog.
-  - **The fetch blocks,** since PyJWT uses `urllib`. The verifier therefore runs the check in a worker thread (`anyio.to_thread.run_sync`), so it never blocks the event loop.
+  - **Why not PyJWT's `PyJWKClient` cache** (Codex, pre-PR and CI reviews):
+    - **Failures aren't counted:** its refetch cooldown counts only from the last *successful* fetch. With an empty or expired cache it fetches before checking the cooldown, so during an AuthKit outage every JWT-shaped token would fetch again.
+    - **Every check waits:** each of those fetches holds its client lock for up to the timeout, and every check waits behind it.
+    - **A failed refresh drops a good set,** so a short outage would refuse the owner's valid tokens.
+  - **The key cache:**
+    - **Fresh for 5 minutes.** After that, the next check refreshes it. A fetch has a 5-second timeout.
+    - **One fetch at a time.** Other checks never start a second fetch:
+      - one whose `kid` is in the current set, even an expired set, verifies against it at once, without waiting
+      - one that has no usable key (no set yet, or an unknown `kid`) waits for the fetch in flight, up to its 5-second timeout, then uses whatever set there is
+    - **Stale if error:** a failed refresh keeps the last good set, and tokens whose `kid` is in it keep working. A short AuthKit outage doesn't sign the owner out.
+    - **Backoff:** after a failed fetch, no fetch is attempted for 30 seconds, and a single line is logged for it, not one per request. In that window, a token with no usable key is refused at once.
+    - **Unknown `kid`s:** they trigger a refresh at most once per 30 seconds, after a success too, so random `kid`s can't turn requests into outbound calls.
+  - **So, during an outage,** there is at most one outbound fetch every 30 seconds. No check waits longer than one fetch timeout. The owner is refused only if the server never fetched the keys, or AuthKit has rotated them.
+  - **The lower bound** in `pyproject.toml` stays mcp's own, `pyjwt[crypto]>=2.10.1`, since the cache doesn't use PyJWT's `cooldown_duration`. The implementation checks that `PyJWKSet` and the decode options above exist in 2.10.1.
+  - **The check runs in a worker thread** (`anyio.to_thread.run_sync`), because the fetch uses `urllib` and blocks. The event loop is never blocked, and a waiting check holds its thread for at most one fetch timeout.
 - **The wrapper, in `server.py`:** a `TokenVerifier` whose `verify_token` calls the check and returns an `AccessToken` with these fields:
   - `subject` = `sub`
   - `client_id` = the `client_id` claim, or `azp`, or `""` if neither is present
@@ -283,8 +285,8 @@ So `--transport http` has three modes:
 - **In-process tests** (the normal matrix, no network):
   - **Tokens:** a test RSA key signs the tokens, and the verifier gets that key in place of the JWKS client.
   - **Through the HTTP app** with Starlette's `TestClient`:
-    - **Accepted:** the owner's token.
-    - **Refused:** wrong `sub`, wrong `aud`, wrong `iss`, expired, missing `exp`/`iat`/`sub`, `alg: none`, an HS256 token signed with the public key, an unknown `kid`, no `kid`, and a garbage token.
+    - **Accepted:** the owner's token, with `aud` as a string and as a list that contains the resource. The unverified precheck accepts both forms, as `jwt.decode` does.
+    - **Refused:** a list `aud` without the resource, wrong `sub`, wrong `aud`, wrong `iss`, expired, missing `exp`/`iat`/`sub`, `alg: none`, an HS256 token signed with the public key, an unknown `kid`, no `kid`, and a garbage token.
     - **Wrong claim types:** a list `scope`, a numeric `client_id` and a numeric `sub` each give 401, never 500.
     - **The 401** carries `resource_metadata` with the public URL.
     - **The metadata** document's exact contents.
@@ -293,18 +295,20 @@ So `--transport http` has three modes:
       - the default allowed host taken from the public URL, with and without a port (`http://localhost:8000` must accept `Host: localhost:8000`)
       - a foreign `Host` rejected on `/mcp`
       - an `Origin` header rejected on `/mcp`
+      - `/health` and the metadata route answer 200 with a foreign `Host`. The D3 probe didn't cover this. M4 tests it for `/health`, and the SDK applies the check only inside its `/mcp` transport.
     - **The request log:** one line, in OAuth mode too, and never the token.
-  - **The fetch gate (D3),** with a fake JWKS client that fails or blocks on demand:
-    - **Repeated failures:** they make one fetch per 30-second window, with an empty cache and with an expired one.
-    - **Concurrency:** a check arriving while a fetch is in flight is refused at once, without waiting.
-    - **Prechecks:** a token that fails one never reaches the client.
-    - **Recovery:** after a success, a token with a known `kid` needs no fetch.
+  - **The key cache (D3),** with a fake fetcher and a fake clock (the fetcher fails, succeeds or blocks on demand):
+    - **Parallel valid tokens at cache expiry:** they all succeed, with one fetch between them.
+    - **Waiting:** a check with no usable key waits for the fetch in flight and then succeeds. If the fetch outlasts its timeout, the check is refused after at most that timeout.
+    - **Stale if error:** after a failed refresh, a token whose `kid` is in the old set is accepted.
+    - **Repeated failures:** at most one fetch per 30-second window, with an empty cache and with an expired one. In the window, a token with no usable key is refused at once.
+    - **Unknown `kid`s:** at most one refresh per 30 seconds.
+    - **Prechecks:** a token that fails one never reaches the fetcher.
   - **`main()`:**
     - **Mode conflicts:** the token with the issuer, and `--no-auth` with either.
     - **Missing or malformed values:** a missing public URL or owner, `http` on a public host, a path on the issuer, and the issuer with a trailing slash.
     - **Half-removed setups:** the leftover-variable warning.
     - **Startup:** no network call at startup.
-  - **The JWKS client:** its timeout and its 30-second cooldown, through PyJWT's settings, with no real fetch.
   - **Stdio and the static-token tests** pass unchanged.
 - **The `Docker image` job** gains a fourth container in OAuth mode:
   - **The address:** it publishes host port 8001, since `dq` already uses 8000.
@@ -385,7 +389,7 @@ Merging this spec also approves these `CLAUDE.md` changes, made in the implement
 1. **`http_auth.py` (D3, D4, D5, D6):**
    - the OAuth settings reader and its validation
    - the JWT check with its prechecks, the owner rule and the never-raise rule
-   - the JWKS client settings and the fetch gate
+   - the key cache: one fetch at a time, stale-if-error and backoff
    - mode resolution, extended to three modes
    - the request-log middleware, with the static check skipped in OAuth mode
 2. **`server.py` (D3, D5, D6):**
@@ -437,6 +441,6 @@ Merging this spec also approves these `CLAUDE.md` changes, made in the implement
 - **Rate limiting and a concurrency cap:**
   - Unauthenticated requests get a 401 without the body being read.
   - A token that fails D3's prechecks costs an unverified decode and never reaches the JWKS.
-  - Outbound fetches are gated to one at a time, with a 30-second backoff after a failure (D3).
+  - Outbound fetches go one at a time, with a 30-second backoff after a failure and at most one refresh per 30 seconds for unknown `kid`s (D3).
   - The only caller who gets through is the owner. Revisit both if the server ever has more than one user.
 - **M5** (polish and docs) keeps its scope.
