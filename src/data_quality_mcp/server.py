@@ -6,8 +6,12 @@ transports (planning/milestone-4.md, D1):
 - stdio (the default): `data-quality-mcp`, or `python -m data_quality_mcp.server`.
   Inspect with `uv run mcp dev src/data_quality_mcp/server.py:app`.
 - Streamable HTTP: `data-quality-mcp --transport http [--host H] [--port P]`,
-  stateless with JSON responses at /mcp, behind a bearer token (http_auth.py).
-  Over HTTP the tools refuse file paths: callers send their data inline (D3).
+  stateless with JSON responses at /mcp. Over HTTP the tools refuse file
+  paths: callers send their data inline (D3).
+
+Over HTTP, exactly one of three auth modes (planning/milestone-4.5.md, D5): a
+static bearer token, OAuth (the SDK's resource-server support, with the token
+check in http_auth.py), or --no-auth on loopback.
 
 Over stdio, stdout carries the JSON-RPC stream: never print. Logs go to stderr,
 on both transports.
@@ -22,6 +26,8 @@ from typing import Any
 
 import uvicorn
 from mcp.server import MCPServer
+from mcp.server.auth.provider import AccessToken
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -32,7 +38,10 @@ from data_quality_mcp.http_auth import (
     HEALTH_PATH,
     LOOPBACK_HOSTS,
     BearerAuthMiddleware,
+    OAuthTokenCheck,
     StartupError,
+    leftover_oauth_variables,
+    read_oauth_settings,
     read_token,
     resolve_auth,
 )
@@ -101,17 +110,57 @@ LOG_CONFIG: dict[str, Any] = {
 logger = logging.getLogger("data_quality_mcp.server")
 
 
-def create_server(*, allow_file_path: bool = True) -> MCPServer:
+class OwnerTokenVerifier:
+    """The SDK's TokenVerifier, around http_auth's OAuthTokenCheck.
+
+    The check (signature, issuer, audience, owner) lives in http_auth.py, which
+    never imports the SDK; this only turns its result into an AccessToken.
+    """
+
+    def __init__(self, check: OAuthTokenCheck) -> None:
+        self._check = check
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        verified = await self._check.verify(token)
+        if verified is None:
+            return None
+        return AccessToken(
+            token=token,
+            client_id=verified.client_id,
+            scopes=verified.scopes,
+            expires_at=verified.expires_at,
+            resource=self._check.settings.resource,
+            subject=verified.subject,
+        )
+
+
+def create_server(
+    *, allow_file_path: bool = True, oauth: OAuthTokenCheck | None = None
+) -> MCPServer:
     """Build the app and register every tools module on it.
 
     `allow_file_path=False` is the HTTP server: its tools refuse file paths,
-    and its instructions tell the agent to send data inline.
+    and its instructions tell the agent to send data inline. `oauth` makes it
+    an OAuth resource server: the SDK serves the protected-resource metadata
+    and requires a token on /mcp, which `oauth` checks.
     """
+    auth: dict[str, Any] = {}
+    if oauth is not None:
+        settings = oauth.settings
+        auth = {
+            "token_verifier": OwnerTokenVerifier(oauth),
+            "auth": AuthSettings(
+                issuer_url=settings.issuer,
+                resource_server_url=settings.resource,
+                validate_token_resource=True,
+            ),
+        }
     app = MCPServer(
         SERVER_NAME,
         version=__version__,
         instructions=INSTRUCTIONS if allow_file_path else HTTP_INSTRUCTIONS,
         lifespan=options_lifespan(ServerOptions(allow_file_path=allow_file_path)),
+        **auth,
     )
     profiling_tools.register(app)
     cleaning_tools.register(app)
@@ -123,19 +172,35 @@ def create_server(*, allow_file_path: bool = True) -> MCPServer:
 app = create_server()
 
 
+def effective_allowed_hosts(
+    allowed_hosts: Sequence[str], oauth: OAuthTokenCheck | None
+) -> list[str]:
+    """The hosts to accept: the given list, or in OAuth mode by default the
+    public URL's host (with its port, if it has one), so the SDK's
+    DNS-rebinding check is on for the live server (milestone-4.5.md, D6)."""
+    if not allowed_hosts and oauth is not None:
+        return [oauth.settings.allowed_host]
+    return list(allowed_hosts)
+
+
 def create_http_app(
     *,
     host: str = "127.0.0.1",
     token: str | None,
     allowed_hosts: Sequence[str] = (),
+    oauth: OAuthTokenCheck | None = None,
 ) -> ASGIApp:
     """The Streamable HTTP app: stateless, JSON responses, /mcp and /health,
-    the request-body cap, the host checks, and the bearer token around it all.
+    the request-body cap, the host checks, and the request log around it all.
 
-    `token=None` serves without auth; `resolve_auth` only allows that on
+    Auth is the static `token`, or `oauth` (the SDK's resource server, plus
+    its metadata route), or neither: `resolve_auth` only allows that on
     loopback with --no-auth.
     """
-    server = create_server(allow_file_path=False)
+    if token is not None and oauth is not None:
+        raise ValueError("a static token and OAuth can't be combined")
+    allowed_hosts = effective_allowed_hosts(allowed_hosts, oauth)
+    server = create_server(allow_file_path=False, oauth=oauth)
 
     @server.custom_route(HEALTH_PATH, methods=["GET"], include_in_schema=False)
     async def health(_request: Request) -> JSONResponse:
@@ -236,25 +301,45 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
 
     try:
-        token = resolve_auth(args.host, read_token(os.environ), args.no_auth)
+        settings = read_oauth_settings(os.environ)
+        token = resolve_auth(
+            args.host, read_token(os.environ), args.no_auth, oauth=settings
+        )
     except StartupError as exc:
         logger.error("data-quality-mcp: %s", exc)
         sys.exit(2)
-    allowed_hosts = parse_allowed_hosts(os.environ)
+    for name in leftover_oauth_variables(os.environ):
+        logger.warning(
+            "%s is set but OAuth is off (DATA_QUALITY_MCP_OAUTH_ISSUER is "
+            "unset), so it is ignored",
+            name,
+        )
+    # Lazy: the key set is fetched on the first token, never at startup
+    oauth = OAuthTokenCheck(settings) if settings is not None else None
+    allowed_hosts = effective_allowed_hosts(parse_allowed_hosts(os.environ), oauth)
+    if settings is not None:
+        auth = (
+            f"oauth (issuer {settings.issuer}, resource {settings.resource}, "
+            "owner check on)"
+        )
+    else:
+        auth = "bearer token" if token else "off"
     logger.info(
         "Serving MCP over HTTP at %s (auth: %s; host check: %s)",
         _url(args.host, args.port),
-        "bearer token" if token else "off",
+        auth,
         _host_check(args.host, allowed_hosts),
     )
-    if token is None:
+    if token is None and oauth is None:
         logger.warning(
             "Auth is off (--no-auth): any program on this machine can call the "
             "tools, and so can anything a reverse proxy or tunnel on this "
             "machine forwards here."
         )
     uvicorn.run(
-        create_http_app(host=args.host, token=token, allowed_hosts=allowed_hosts),
+        create_http_app(
+            host=args.host, token=token, allowed_hosts=allowed_hosts, oauth=oauth
+        ),
         host=args.host,
         port=args.port,
         log_config=LOG_CONFIG,

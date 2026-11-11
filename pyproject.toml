@@ -1,6 +1,6 @@
 [project]
 name = "data-quality-mcp"
-version = "0.5.0"
+version = "0.6.0"
 description = "MCP server exposing deterministic dataset profiling and cleaning as tools for AI agents"
 readme = "README.md"
 license = "MIT"
@@ -15,6 +15,7 @@ dependencies = [
     "pydantic>=2.7",
     "typing_extensions>=4.12",
     # Imported directly by server.py and http_auth.py (they also come with mcp)
+    "pyjwt[crypto]>=2.10.1",
     "starlette>=0.48.0",
     "uvicorn>=0.31.1",
 ]

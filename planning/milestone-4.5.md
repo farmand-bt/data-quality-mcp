@@ -1,6 +1,6 @@
 # Milestone 4.5: Live Deployment and OAuth
 
-> **Status: proposed.** This spec is for review. Nothing is implemented yet.
+> **Status: implemented in 0.6.0.** See **As built** at the end for the measured limits, the deviations, and the live findings.
 > Shared context (architecture, report schema, design decisions) is in [project-overview.md](project-overview.md). Where this spec changes a decision recorded there, or in [milestone-4.md](milestone-4.md), **this spec wins** until the implementation PR updates them. In particular, it keeps the static token that M4's D2 said would be dropped when OAuth arrives (D5). The previous milestone is [milestone-4.md](milestone-4.md).
 
 **Goal:** run the server live on the public internet, usable from claude.ai (as a custom connector) and from Claude Code, by its owner only, at no cost:
@@ -444,3 +444,54 @@ Merging this spec also approves these `CLAUDE.md` changes, made in the implement
   - Outbound fetches go one at a time, with a 30-second backoff after a failure and at most one refresh per 30 seconds for unknown `kid`s (D3).
   - The only caller who gets through is the owner. Revisit both if the server ever has more than one user.
 - **M5** (polish and docs) keeps its scope.
+
+## As built
+
+**Code:**
+- **`http_auth.py`:**
+  - `OAuthSettings` and `read_oauth_settings`: D6's rules, each failure a `StartupError` naming the variable.
+  - `JwksCache`: D3's key cache. One rule covers the backoff and unknown `kid`s: a fetch starts only 30 s after the previous attempt, whatever its outcome.
+  - `OAuthTokenCheck`: the prechecks, then the key, `jwt.decode`, and the type checks.
+  - `resolve_auth`: the three modes.
+- **`server.py`:**
+  - `OwnerTokenVerifier`, the SDK wrapper.
+  - `create_server(oauth=...)` and `create_http_app(oauth=...)`.
+  - `effective_allowed_hosts`, for the netloc default.
+- **Unchanged:** the core, `config.py` and the `Dockerfile`.
+
+**Deviations from the text above, all small:**
+- **The worker thread:** the check runs through `starlette.concurrency.run_in_threadpool`, which is `anyio.to_thread.run_sync` underneath. That's Starlette, already a declared dependency, rather than importing `anyio` directly.
+- **The XLSX expansion cap** on Render is 35 MB, not the proposed 60 MB, and the row cap stays at 100,000. See the sizing below.
+- **The JWKS keys kept:** RSA keys with a `kid`, whose algorithm is RS256 (stated, or PyJWT's default for RSA), and whose `use` is missing or `sig`. Other keys in the set are dropped.
+- **Two defensive re-checks** after `jwt.decode` are marked `pragma: no cover`, because the precheck and PyJWT already cover them: `sub` equals the owner, and `exp` is a number.
+
+**Sizing (D7)** is in [`docs/deployment.md`](../docs/deployment.md#limits-on-the-free-instance). Measured locally under `--memory=512m --memory-swap=512m --cpus=0.1`:
+- **Memory:** every worst case peaked at or under 309 MiB, against the 400 MiB rule. The idle server was 173 MiB.
+- **Time:** the slowest call at the proposed limits was a numeric XLSX: 99,999 rows × 14 columns, 72.6 s.
+  - The time follows the cell count, about 50 s per million numeric cells at 0.1 CPU, not the rows: 28 columns at half the rows took 45.8 s.
+  - So the expansion cap came down to 35 MB, about a million numeric cells. The slowest case is now 51.7 s.
+- **Startup:** from `docker run` to a healthy `/health` took 24–33 s at 0.1 CPU.
+- **The final values:** request 8 MB, file 8 MB, expansion 35 MB, 100,000 rows, inline output 1 MB.
+
+**Tests:** 858 pass, on Python 3.12 with pandas 3 and on Python 3.10 with pandas 2.3.3. Coverage is 98%.
+- **The new files:** `test_oauth.py`, `test_jwks_cache.py` and `oauth_helpers.py`. `test_server_main.py` gains the startup cases.
+- **Beyond D9's list:**
+  - a test pins the OAuth app's three routes, so a route a later SDK adds can't go unauthenticated while the static middleware is off
+  - a key signed by a different key under a known `kid` is refused
+  - `_fetch_jwks` runs against a local HTTP server: a non-200 status, an oversized body and bad JSON
+- **The PyJWT lower bound:** the OAuth tests also pass against PyJWT 2.10.1.
+
+**Docker:**
+- the image is 637 MB
+- the static-token and `--oauth` smoke tests pass locally
+- the OAuth-mode container makes no outbound call: its log shows only the refusal `token refused: DecodeError`
+
+**`render.yaml`** validates against Render's published schema (`https://render.com/schema/render.yaml.json`). Render's docs list no payment-method requirement for Blueprints.
+
+**Live (pending the account steps):**
+- CIMD or DCR
+- the token's claim names and algorithm
+- whether `iss` equals the AuthKit domain exactly
+- `Origin` from claude.ai
+- a cold start
+- the largest CSV case through `scripts/oauth_client.py`

@@ -38,8 +38,9 @@ jobs:
           create_server()
           "
 
-  # Build the image and smoke-test it over HTTP (planning/milestone-4.md, D7).
-  # Nothing is pushed.
+  # Build the image and smoke-test it over HTTP (planning/milestone-4.md, D7),
+  # in static-token mode and in OAuth mode (milestone-4.5.md, D9). Nothing is
+  # pushed, and the OAuth container never calls its (made-up) issuer.
   docker:
     name: Docker image
     runs-on: ubuntu-latest
@@ -62,9 +63,16 @@ jobs:
           docker run -d --name dq-hosts -e DATA_QUALITY_MCP_TOKEN="$token" \
             -e DATA_QUALITY_MCP_ALLOWED_HOSTS=example.com data-quality-mcp:ci
 
-      - name: Wait until both containers are healthy
+      - name: Start one in OAuth mode
         run: |
-          for name in dq dq-hosts; do
+          docker run -d --name dq-oauth -p 8001:8000 \
+            -e DATA_QUALITY_MCP_OAUTH_ISSUER=https://issuer.invalid \
+            -e DATA_QUALITY_MCP_PUBLIC_URL=http://localhost:8001 \
+            -e DATA_QUALITY_MCP_OAUTH_OWNER=user_ci_owner data-quality-mcp:ci
+
+      - name: Wait until the containers are healthy
+        run: |
+          for name in dq dq-hosts dq-oauth; do
             for _ in $(seq 1 60); do
               status=$(docker inspect -f '{{.State.Health.Status}}' "$name")
               [ "$status" = healthy ] && break
@@ -85,6 +93,21 @@ jobs:
           fi
           grep -F "'POST' '/mcp' 200" dq.log
 
+      # localhost, not 127.0.0.1: the Host must match the public URL's
+      - name: Smoke-test OAuth mode
+        run: python3 scripts/docker_smoke_test.py --oauth http://localhost:8001
+
+      - name: The OAuth log never contains the token
+        run: |
+          docker logs dq-oauth > oauth.log 2>&1
+          cat oauth.log
+          if grep -qF not-a-jwt- oauth.log; then
+            echo "The made-up token appears in the container log"; exit 1
+          fi
+          grep -F "auth: oauth (issuer https://issuer.invalid" oauth.log
+          grep -F "token refused: DecodeError" oauth.log
+          grep -F "'POST' '/mcp' 401" oauth.log
+
       - name: Without a token the container refuses to start
         run: |
           status=0
@@ -96,4 +119,4 @@ jobs:
 
       - name: Container logs
         if: failure()
-        run: docker logs dq; docker logs dq-hosts
+        run: docker logs dq; docker logs dq-hosts; docker logs dq-oauth

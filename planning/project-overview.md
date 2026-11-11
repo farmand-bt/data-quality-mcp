@@ -24,8 +24,9 @@ An MCP (Model Context Protocol) server that exposes the core logic of the Data Q
 | Testing                | `pytest`, `pytest-cov`, anyio plugin     | Unit tests for core logic; in-memory `mcp.Client` tests for tools   |
 | Environment / tasks    | `uv`, GNU `make`                         | `uv sync` manages `.venv` + `uv.lock`; `make` wraps common commands |
 | Debugging (dev only)   | MCP Inspector (bundled with the SDK)     | Interactive tool for testing tools/resources/prompts before wiring to a real client |
-| Transport (Milestone 4)| Streamable HTTP (via SDK), uvicorn       | Lets the server run remotely, not just locally over stdio; stateless, behind a bearer token |
+| Transport (Milestone 4)| Streamable HTTP (via SDK), uvicorn       | Lets the server run remotely, not just locally over stdio; stateless, behind a bearer token or OAuth |
 | Containerization (M4)  | Docker (`python:3.13-slim`, from `uv.lock`) | Standard way to deploy an MCP server remotely; built and smoke-tested in CI |
+| Hosting (M4.5)         | Render free web service, WorkOS AuthKit (staging), PyJWT | The live server for claude.ai and Claude Code, owner only, at no cost; no payment method on any account |
 | CI/CD                  | GitHub Actions + Dependabot              | Free for public repos; every change goes through a PR gated by checks |
 | AI code review         | `anthropics/claude-code-action`          | Runs on PRs, authenticated with the Claude Pro subscription (OAuth token, no API key) |
 
@@ -43,7 +44,7 @@ An MCP (Model Context Protocol) server that exposes the core logic of the Data Q
 │        Claude Desktop · Cursor · claude.ai · custom agent      │
 └─────────────────────────────┬───────────────────────────────────┘
                                │  MCP protocol (JSON-RPC)
-                               │  stdio (local) or Streamable HTTP (bearer token, M4)
+                               │  stdio (local) or Streamable HTTP (bearer token or OAuth, M4/M4.5)
                                ▼
 ┌───────────────────────────────────────────────────────────────┐
 │                    data-quality-mcp-server                      │
@@ -81,7 +82,7 @@ data-quality-mcp/
 │       ├── commitlint.yml           # PR title follows Conventional Commits
 │       ├── lint.yml                 # ruff check + ruff format --check
 │       ├── test.yml                 # pytest matrix (Ubuntu × Python 3.10–3.14, Windows × 3.10 and 3.14)
-│       ├── build.yml                # wheel/sdist build + twine check; Docker image build + HTTP smoke test (M4)
+│       ├── build.yml                # wheel/sdist build + twine check; Docker image build + HTTP smoke tests, token and OAuth modes (M4, M4.5)
 │       ├── security.yml             # pip-audit, Bandit, CodeQL
 │       └── claude-review.yml        # Claude Code Review on PRs
 ├── README.md                        # What MCP is, how to connect, tool reference
@@ -94,7 +95,7 @@ data-quality-mcp/
 │   └── data_quality_mcp/
 │       ├── __init__.py
 │       ├── server.py                # Command line; creates the MCPServer app, calls each tools module's register(app); the HTTP app
-│       ├── http_auth.py             # Bearer-token middleware and request log for HTTP (Starlette, no mcp; Milestone 4)
+│       ├── http_auth.py             # HTTP auth: request log, bearer token (M4), OAuth settings, JWT check and key cache (M4.5); Starlette and PyJWT, no mcp
 │       ├── config.py                # Settings: size limits, thresholds, env overrides (no mcp imports)
 │       │
 │       ├── profiler_core/           # Vendored + simplified profiling engine (pure Python)
@@ -141,7 +142,10 @@ data-quality-mcp/
 │   ├── test_writer.py
 │   ├── test_tools.py
 │   ├── test_http.py                 # The HTTP transport in process (Milestone 4)
-│   ├── test_server_main.py          # Command line, token rules, limit overrides (Milestone 4)
+│   ├── test_server_main.py          # Command line, auth modes, OAuth settings, limit overrides (M4, M4.5)
+│   ├── test_oauth.py                # OAuth mode through the HTTP app, locally signed tokens (Milestone 4.5)
+│   ├── test_jwks_cache.py           # The signing-key cache and the JWKS fetch (Milestone 4.5)
+│   ├── oauth_helpers.py             # Test keys, token minting, fake fetcher and clock (Milestone 4.5)
 │   └── fixtures/
 │       ├── clean_sample.csv
 │       └── messy_sample.csv
@@ -155,13 +159,16 @@ data-quality-mcp/
 │
 ├── scripts/
 │   ├── generate_messy_data.py
-│   └── docker_smoke_test.py         # Standard-library HTTP smoke test of the image (Milestone 4)
+│   ├── docker_smoke_test.py         # Standard-library HTTP smoke test of the image, token and --oauth modes (M4, M4.5)
+│   └── oauth_client.py              # The owner's scripted OAuth client for the live check (Milestone 4.5, never in CI)
 │
 ├── Dockerfile                       # Added Milestone 4: two stages, non-root, health check
 ├── .dockerignore                    # Keeps data, secrets and caches out of the build context
+├── render.yaml                      # Render Blueprint: the free web service and its limits (Milestone 4.5)
 │
 └── docs/
-    └── architecture.md
+    ├── architecture.md
+    └── deployment.md                # Render and WorkOS (tested), Cloud Run (untested) (Milestone 4.5)
 ```
 
 ---
@@ -177,13 +184,13 @@ This project is built across 5 milestones, plus a short Milestone 3.5 — delibe
 | **3** ✅  | **Flexible Input + Cleaning Tools** ([spec](milestone-3.md)) | Inline data support (not just file paths), cleaning tools ported from the cleaner engine |
 | **3.5** ✅ | **Profiling Follow-ups** ([spec](milestone-3.5.md)) | What missing values go with, possible placeholder codes, repeated IDs, ISO dates in CSVs, a minimum for correlations, finite-only fills |
 | **4** ✅  | **Remote-Ready Server** ([spec](milestone-4.md)) | Streamable HTTP transport, bearer auth, no file access over HTTP, Docker image and CI |
-| **Later** | **Live Deployment and OAuth**         | A hosting choice, a published image, OAuth for claude.ai connectors. Specced once a host and an identity provider are chosen: a Milestone 4.5 or part of M5 |
+| **4.5** ✅ | **Live Deployment and OAuth** ([spec](milestone-4.5.md)) | A free Render web service built from the `Dockerfile`, OAuth sign-in through WorkOS AuthKit for claude.ai and Claude Code, owner only, limits sized for the free instance |
 | **5**     | **Polish & Docs**                     | README with connection guides, full test pass, optional MCP registry listing  |
 
 **Important for scaffolding decisions made now:**
 - **The core/tools boundary is the single most important structural decision in this project.** `profiler_core/`, `cleaner_core/`, and `config.py` must never import anything from `mcp`, nor (since Milestone 4) the web stack. They should be plain, testable Python that could be reused outside an MCP context. Only `tools/` and `server.py` touch the MCP SDK — this keeps the core logic transport-agnostic ahead of Milestone 4, when a second transport (HTTP) is added alongside stdio.
 - **Registration pattern (avoids circular imports and keeps the boundary clean):** each `tools/*.py` module defines plain functions plus a `register(app: MCPServer) -> None` function that registers them. `server.py` creates the app, calls each module's `register(app)`, and runs it. Tool modules never import a global app object from `server.py`.
-- **The boundary is enforced by a test, not by review alone:** `tests/test_architecture.py` walks `profiler_core/` and `cleaner_core/` (and `config.py`) and fails on any import of the MCP SDK (`mcp`, `mcp_types`) or, since Milestone 4, the web stack. It also checks that `http_auth.py` never imports the SDK.
+- **The boundary is enforced by a test, not by review alone:** `tests/test_architecture.py` walks `profiler_core/` and `cleaner_core/` (and `config.py`) and fails on any import of the MCP SDK (`mcp`, `mcp_types`), the web stack (since Milestone 4) or PyJWT (`jwt`, since Milestone 4.5). It also checks that `http_auth.py` never imports the SDK.
 - `profiler_core/loader.py` was designed from Milestone 1 to accept either a `file_path` or `inline_content`, so the tools could gain inline input in Milestone 3 without a redesign. Inline CSV is plain text and inline XLSX is base64 (see Dual Input Mode).
 - Every tool's docstring and type hints matter more here than in a typical project — the SDK's `MCPServer` derives the schema and description an agent sees directly from them. Write them as if a language model, not a human, is the only reader.
 
@@ -300,7 +307,7 @@ Every change (feature, fix, refactor, docs) goes through a branch and a PR. The 
 | `commitlint.yml`    | pull_request                     | PR title matches Conventional Commits                                  |
 | `lint.yml`          | pull_request, push to `main`     | `ruff check`, `ruff format --check`                                    |
 | `test.yml`          | pull_request, push to `main`     | `pytest` with coverage; Ubuntu × Python 3.10–3.14, Windows × 3.10 and 3.14 (covers pandas 2 and 3) |
-| `build.yml`         | pull_request, push to `main`     | `uv build`, `twine check --strict`, installed-wheel smoke test; `Docker image` job: build, HTTP smoke test, no token in the log, refusal without a token |
+| `build.yml`         | pull_request, push to `main`     | `uv build`, `twine check --strict`, installed-wheel smoke test; `Docker image` job: build, HTTP smoke test, no token in the log, refusal without a token, and an OAuth-mode container (401, metadata, made-up token refused, no network call) |
 | `security.yml`      | pull_request, push to `main`, weekly | `pip-audit` (dependency CVEs), Bandit (code), CodeQL (Python)       |
 | `claude-review.yml` | pull_request                     | `anthropics/claude-code-action` review, authenticated via a `CLAUDE_CODE_OAUTH_TOKEN` repo secret generated with `claude setup-token` (uses the Pro subscription, no API key). Advisory, not a required check, so a usage limit can't block merges. Can be disabled if usage runs high. |
 | Dependabot          | weekly                           | `uv`, GitHub Actions and Docker base-image updates, one grouped PR each |
