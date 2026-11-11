@@ -3,10 +3,11 @@
 ## Layers
 
 ```
-MCP client (Claude Desktop, Cursor, Claude Code, VS Code, custom agent)
+MCP client (Claude Desktop, Cursor, Claude Code, VS Code, claude.ai, custom agent)
         │  JSON-RPC over stdio, or Streamable HTTP (/mcp, stateless, JSON responses)
         ▼
-http_auth.py        HTTP only: bearer-token middleware and per-request log (Starlette, no mcp)
+http_auth.py        HTTP only: request log, bearer token, OAuth settings and JWT check
+                    (Starlette and PyJWT, no mcp)
         │
 server.py           command line; create_server(): builds MCPServer with the per-transport
         │           options and calls each tools module's register(app); the HTTP app (uvicorn)
@@ -18,7 +19,7 @@ profiler_core/      pure Python engine (pandas/numpy): loader, type detection, s
 config.py           missing values, report, schema. Never imports `mcp` or a web framework.
 ```
 
-**The rule:** only `server.py` and `tools/` may import the MCP SDK. `profiler_core/`, `cleaner_core/` and `config.py` never do, and they don't import the web stack either (`starlette`, `uvicorn`, `httpx2`, `sse_starlette`). `http_auth.py` uses Starlette but not the SDK. `tests/test_architecture.py` parses every file concerned and fails the build on a forbidden import. Because of this, the HTTP transport in Milestone 4 added an entry point and one keyword to the core (`allow_file_path`), not a rewrite.
+**The rule:** only `server.py` and `tools/` may import the MCP SDK. `profiler_core/`, `cleaner_core/` and `config.py` never do, and they don't import the web stack either (`starlette`, `uvicorn`, `httpx2`, `sse_starlette`). `http_auth.py` uses Starlette and PyJWT but not the SDK, and the core doesn't import PyJWT (`jwt`) either. `tests/test_architecture.py` parses every file concerned and fails the build on a forbidden import. Because of this, the HTTP transport in Milestone 4 added an entry point and one keyword to the core (`allow_file_path`), not a rewrite.
 
 ## Transports (Milestone 4)
 
@@ -29,6 +30,39 @@ config.py           missing values, report, schema. Never imports `mcp` or a web
 - **The per-transport switch:** `create_server(allow_file_path=False)` gives the app a lifespan that yields `tools.options.ServerOptions`. Each tool takes an optional `ctx: Context | None`, which the SDK injects and leaves out of the input schema, and reads the options through `file_path_allowed(ctx)`. It fails closed: a call that came through a server without those options can't use file paths. A direct Python call (`ctx` is `None`) can. The core gets only `allow_file_path=False` and rejects `file_path` and `output_path` before any filesystem call.
 - **Limits from the environment:** `config.py` reads five `DATA_QUALITY_MCP_*` overrides at import, before any core module binds its keyword defaults. An invalid value is collected in `CONFIG_ERRORS`, and `main()` reports it and exits with status 2.
 - **Docker:** a two-stage `python:3.13-slim` image installed from `uv.lock` with `--frozen`, running as a non-root user, with a health check on `/health`. CI builds it and smoke-tests it over HTTP (`scripts/docker_smoke_test.py`).
+
+## OAuth and the live deployment (Milestone 4.5)
+
+Over HTTP, exactly one auth mode is chosen at startup (`http_auth.resolve_auth`): the static token, OAuth (`DATA_QUALITY_MCP_OAUTH_ISSUER` set), or `--no-auth` on loopback. Two at once is a startup error.
+
+```
+claude.ai / Claude Code            this server (Render)                 WorkOS AuthKit
+   │ POST /mcp, no token              │                                       │
+   │─────────────────────────────────▶│                                       │
+   │◀─ 401, resource_metadata=... ────│                                       │
+   │ GET /.well-known/oauth-protected-resource/mcp                            │
+   │─────────────────────────────────▶│                                       │
+   │◀─ resource, authorization_servers│                                       │
+   │ register (CIMD or DCR), sign in, token for resource=/mcp (PKCE)          │
+   │─────────────────────────────────────────────────────────────────────────▶│
+   │ POST /mcp, Bearer <JWT>          │ JWKS, on the first token, then cached │
+   │─────────────────────────────────▶│──────────────────────────────────────▶│
+   │◀─ 200 if sub is the owner, 401 otherwise                                 │
+```
+
+- **The SDK's part:** `create_server(oauth=...)` passes a `TokenVerifier` and `AuthSettings` to `MCPServer`. The SDK then serves the RFC 9728 metadata, puts `RequireAuthMiddleware` on `/mcp` only, and answers a missing or refused token with a 401 that points to the metadata. `/health` and the metadata route stay open.
+- **The check** (`http_auth.OAuthTokenCheck`): an RS256 JWT signed by a key from the issuer's JWKS, with the exact issuer, the public `/mcp` URL as its audience, `exp`, `iat` and `sub` present, and `sub` equal to `DATA_QUALITY_MCP_OAUTH_OWNER`.
+  - Cheap checks on the unverified token come first, so most bad tokens never reach the key cache. They are a filter, not the security boundary.
+  - The check never raises: the SDK's authentication middleware runs on every route, so an exception would be a 500, even on `/health`.
+  - It runs in a worker thread, because a key fetch blocks.
+- **The wrapper:** `server.OwnerTokenVerifier` turns the check's `VerifiedToken` into the SDK's `AccessToken`. It's the only OAuth code that imports the SDK.
+- **The key cache** (`http_auth.JwksCache`):
+  - fresh for 5 minutes, one fetch at a time, with a 5 s timeout
+  - 30 s between fetch attempts: the backoff after a failure, and the limit for unknown `kid`s
+  - stale-if-error: a failed refresh keeps the last good set, and a check whose `kid` is known never waits for another check's fetch
+  - **The trade-off:** while the issuer is unreachable, a key it has rotated out keeps working until the next successful fetch.
+- **Request log and WebSockets:** `BearerAuthMiddleware` stays outermost with `token=None`, so it still logs every request and closes WebSockets. A test pins the OAuth app's routes, so a route a later SDK adds can't slip in unauthenticated.
+- **Hosting:** `render.yaml` describes a free Render web service built from the `Dockerfile`, deployed only after a commit's checks pass, with lower limits for 512 MB and 0.1 CPU. Everything is configured through environment variables, so the image runs unchanged on another host. See [`deployment.md`](deployment.md).
 
 ## Registration pattern
 

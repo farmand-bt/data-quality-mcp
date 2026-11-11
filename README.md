@@ -4,7 +4,7 @@ An MCP server that exposes the core logic of the Data Quality Analyzer project a
 
 Instead of a person uploading a CSV to a dashboard, an agent calls `profile_dataset` as part of its own workflow and gets back a structured, schema-validated quality report. The server makes **no LLM calls**: it is deterministic tooling, and the reasoning happens in whichever agent calls it.
 
-> **Status:** Milestones 1–4 of 5. Profiling covers types, statistics, missing values and what they go with, outliers and possible placeholder codes, duplicates and repeated IDs, correlations, prioritized recommendations and a quality score. `clean_dataset` applies cleaning steps and reports what changed. Every tool takes a file path or the data inline. The server runs over stdio or over HTTP with a bearer token, and ships as a Docker image; a live deployment with OAuth comes later. See [`planning/project-overview.md`](planning/project-overview.md) and the per-milestone specs in [`planning/`](planning/).
+> **Status:** Milestones 1–4.5 of 5. Profiling covers types, statistics, missing values and what they go with, outliers and possible placeholder codes, duplicates and repeated IDs, correlations, prioritized recommendations and a quality score. `clean_dataset` applies cleaning steps and reports what changed. Every tool takes a file path or the data inline. The server runs over stdio or over HTTP (with a bearer token or OAuth sign-in), ships as a Docker image, and runs live on a free host for its owner, usable from claude.ai and Claude Code ([Live deployment](#live-deployment)). See [`planning/project-overview.md`](planning/project-overview.md) and the per-milestone specs in [`planning/`](planning/).
 
 ## Tools
 
@@ -114,7 +114,15 @@ Then ask the agent something like *"Profile C:\data\sales.csv and tell me what n
 
 `data-quality-mcp --transport http` serves [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) at `http://127.0.0.1:8000/mcp` (stateless, JSON responses). `--host` and `--port` change the address. `GET /health` answers `{"status": "ok"}` without a token.
 
-**The token** is required on every host. Every request must carry it as `Authorization: Bearer <token>`:
+Over HTTP the server uses exactly one of three auth modes, and refuses to start if two are set:
+
+| Mode | Chosen by | For |
+|---|---|---|
+| Bearer token | `DATA_QUALITY_MCP_TOKEN` | Local use, Docker, CI, Claude Code or VS Code with a header |
+| OAuth sign-in | `DATA_QUALITY_MCP_OAUTH_ISSUER` | A public deployment, for claude.ai and Claude Code ([Live deployment](#live-deployment)) |
+| None | `--no-auth`, loopback only | Quick local experiments |
+
+**The token** is required on every host unless OAuth is set. Every request must carry it as `Authorization: Bearer <token>`:
 
 1. Copy `.env.example` to `.env` (it's gitignored) and set `DATA_QUALITY_MCP_TOKEN`. Generate one with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. It needs at least 32 characters from `A-Z a-z 0-9 - . _ ~ + /`. Write it **unquoted**: `docker --env-file` would keep quotes as part of the value.
 2. `make run-http` (or `uv run --env-file .env data-quality-mcp --transport http`).
@@ -125,14 +133,14 @@ Without a token the server refuses to start and says why. For a quick local expe
 - **Claude Code:** `claude mcp add --transport http data-quality http://localhost:8000/mcp --header "Authorization: Bearer <token>"`
 - **VS Code:** [`examples/vscode_mcp.json`](examples/vscode_mcp.json), for `.vscode/mcp.json`. It prompts for the token and stores it securely, so the file holds no secret.
 - **MCP Inspector (v2):** `npx @modelcontextprotocol/inspector --cli --transport http --server-url http://localhost:8000/mcp --header "Authorization: Bearer <token>" --method tools/list`, or the config file [`examples/inspector_config.json`](examples/inspector_config.json) (`--config ... --server data-quality-http`). That file holds the token as written, so keep your copy out of git.
-- **Claude Desktop and claude.ai:** use stdio (above). A custom connector needs a public HTTPS address and OAuth, which come with the later deployment.
+- **claude.ai:** a custom connector needs a public HTTPS address and OAuth: see [Live deployment](#live-deployment). Claude Desktop can use stdio (above).
 
 **What's different over HTTP:**
 - **No file access:** the server can't see your files, so `file_path` and `output_path` are refused with an error that says to send the data inline. `clean_dataset` returns the cleaned data in the result.
 - **Request size:** a request can carry up to 16 MB (`DATA_QUALITY_MCP_MAX_HTTP_REQUEST_MB`). A larger one gets HTTP `413` before any tool runs, so the agent sees a transport error, not a tool error. A CSV can use almost all of it, minus the JSON envelope and escaping. Base64 adds a third, so an `.xlsx` can be about 12 MB.
-- **Host check:** on loopback the SDK rejects requests whose `Host` or `Origin` isn't local (DNS-rebinding protection). On a public interface, set `DATA_QUALITY_MCP_ALLOWED_HOSTS` (comma-separated, e.g. `mcp.example.com,mcp.example.com:443`) to the hostnames clients use. `/health` isn't host-checked, so a container's health check keeps working.
+- **Host check:** on loopback the SDK rejects requests whose `Host` or `Origin` isn't local (DNS-rebinding protection). On a public interface, set `DATA_QUALITY_MCP_ALLOWED_HOSTS` (comma-separated, e.g. `mcp.example.com,mcp.example.com:443`) to the hostnames clients use; in OAuth mode it defaults to the public URL's host. `/health` isn't host-checked, so a container's health check keeps working.
 - **TLS:** the server speaks plain HTTP. Anywhere beyond localhost it must sit behind TLS (a hosting platform or a reverse proxy), or the token travels in clear text.
-- **Logs** go to stderr: one line per request with the method, the path (escaped, without the query string) and the status. The token, headers and bodies are never logged. Requests without a token are logged too, so a public deployment should rate-limit or rotate logs.
+- **Logs** go to stderr: one line per request with the method, the path (escaped, without the query string) and the status. Tokens, their claims, headers and bodies are never logged. Requests without a token are logged too, so a public deployment should rate-limit or rotate logs.
 
 **Sizing** (peak memory of the server process, measured in the Docker image):
 
@@ -144,7 +152,7 @@ Without a token the server refuses to start and says why. For a quick local expe
 | 2.9 MiB of base64 `.xlsx` of long text, unpacking to 191 MiB | ~600 MiB |
 | 46 MB CSV over stdio (499,000 rows × 12 columns) | ~500 MiB |
 
-Plan for about 1 GiB for one call at a time. Concurrent calls each need their own memory and add up: the server is single-tenant, with no concurrency cap. Lower the limits below for a smaller container.
+Plan for about 1 GiB for one call at a time. Concurrent calls each need their own memory and add up: the server is single-tenant, with no concurrency cap. Lower the limits below for a smaller container: [`docs/deployment.md`](docs/deployment.md#limits-on-the-free-instance) has the values and figures for 512 MB and a tenth of a CPU.
 
 ## Docker
 
@@ -153,7 +161,19 @@ make docker-build   # docker build -t data-quality-mcp .
 make docker-run     # docker run --rm --env-file .env -p 8000:8000 data-quality-mcp
 ```
 
-The image (Python 3.13, installed exactly from `uv.lock`) runs as a non-root user and serves HTTP on port 8000, with a health check on `/health`. The token is passed at run time and never stored in the image; without one the container exits at startup. It is built and smoke-tested in CI, and not published to a registry yet.
+The image (Python 3.13, installed exactly from `uv.lock`) runs as a non-root user and serves HTTP on port 8000, with a health check on `/health`. The token (or the OAuth settings) is passed at run time and never stored in the image; without an auth mode the container exits at startup. It is built and smoke-tested in CI, in both modes, and isn't published to a registry: the live host builds it from the `Dockerfile`.
+
+## Live deployment
+
+The server runs on a free [Render](https://render.com) web service, built from this repo's `Dockerfile` ([`render.yaml`](render.yaml)), with sign-in through [WorkOS AuthKit](https://workos.com/docs/authkit/mcp). It accepts **only its owner**: anyone can sign in to AuthKit, but the server refuses every token whose user isn't the configured owner. To run your own, follow [`docs/deployment.md`](docs/deployment.md); it costs nothing, as long as no payment method is ever added to either account.
+
+**Connect from claude.ai:** Settings → Connectors → Add custom connector, with the URL `https://<name>.onrender.com/mcp`, then sign in when asked. A connector's auth settings can't be edited afterwards: to change them, remove the connector and add it again.
+
+**Connect from Claude Code:** `claude mcp add --transport http data-quality https://<name>.onrender.com/mcp`, then run `/mcp` in Claude Code to sign in.
+
+**Cold starts:** the free service sleeps after 15 minutes without traffic and takes about a minute to wake. Claude gives up on the sign-in steps after 10 seconds, so the first connection after a sleep can fail. Open `https://<name>.onrender.com/health` in a browser first, and connect once it answers.
+
+**Size:** the free instance has 512 MB and a tenth of a CPU, so the live server's limits are lower than the defaults (see [`docs/deployment.md`](docs/deployment.md#limits-on-the-free-instance)). It runs one large call at a time: two at once can run out of memory, and Render then restarts it.
 
 ## Limits
 
@@ -180,7 +200,7 @@ make generate-data  # regenerate synthetic fixtures
 
 Architecture and design rules are in [`docs/architecture.md`](docs/architecture.md) and [`CLAUDE.md`](CLAUDE.md). The key rule: the engines (`profiler_core/`, `cleaner_core/`) never import the MCP SDK or a web framework. Only `tools/` and `server.py` touch the SDK, and a test enforces this.
 
-Every change goes through a pull request. CI runs commitlint on the PR title, lint, tests (Ubuntu and Windows, Python 3.10–3.14), the package and Docker image builds (with an HTTP smoke test of the image), security scans (pip-audit, Bandit, CodeQL) and an automated Claude review.
+Every change goes through a pull request. CI runs commitlint on the PR title, lint, tests (Ubuntu and Windows, Python 3.10–3.14), the package and Docker image builds (with HTTP smoke tests of the image, with a token and in OAuth mode), security scans (pip-audit, Bandit, CodeQL) and an automated Claude review.
 
 ## License
 

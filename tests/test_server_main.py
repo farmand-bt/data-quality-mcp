@@ -11,7 +11,7 @@ import sys
 import pytest
 from starlette.testclient import TestClient
 
-from data_quality_mcp import config, server
+from data_quality_mcp import config, http_auth, server
 
 TOKEN = "t0ken-for-tests_0123456789abcdefghijklmnop"
 LIMITS = {
@@ -297,3 +297,272 @@ def test_an_override_reaches_the_core():
     assert result.returncode == 1
     assert "TooManyRowsError" in result.stderr
     assert "5" in result.stderr.splitlines()[-1]
+
+
+# --- OAuth mode (milestone-4.5.md, D5, D6) ---
+
+ISSUER = "https://example-tenant.authkit.app"
+OWNER = "user_01OWNER"
+OAUTH_ENV = {
+    "DATA_QUALITY_MCP_OAUTH_ISSUER": ISSUER,
+    "DATA_QUALITY_MCP_PUBLIC_URL": "https://dq.example.onrender.com",
+    "DATA_QUALITY_MCP_OAUTH_OWNER": OWNER,
+}
+
+
+@pytest.fixture
+def oauth_env(monkeypatch):
+    def set_env(**overrides: str | None):
+        for name, value in {**OAUTH_ENV, **overrides}.items():
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+
+    return set_env
+
+
+@pytest.fixture
+def no_network(monkeypatch):
+    def refuse(*args, **kwargs):
+        raise AssertionError("no network call at startup")
+
+    monkeypatch.setattr(http_auth.urllib.request, "urlopen", refuse)
+
+
+def test_oauth_mode_starts_without_a_network_call(
+    oauth_env, caplog, served, no_network
+):
+    caplog.set_level(logging.INFO)
+    oauth_env()
+    server.main(["--transport", "http", "--host", "0.0.0.0"])
+
+    assert served["host"] == "0.0.0.0"
+    assert (
+        f"auth: oauth (issuer {ISSUER}, resource "
+        "https://dq.example.onrender.com/mcp, owner check on)" in caplog.text
+    )
+    assert "host check: dq.example.onrender.com" in caplog.text
+    assert OWNER not in caplog.text  # the owner check is on, the ID isn't logged
+    assert "Auth is off" not in caplog.text
+    base = "https://dq.example.onrender.com"
+    with TestClient(served["app"], base_url=base) as client:
+        response = client.get("/.well-known/oauth-protected-resource/mcp")
+        assert response.json()["authorization_servers"] == [ISSUER]
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+        assert client.post("/mcp", json=body).status_code == 401
+
+
+def test_a_public_url_with_a_trailing_slash_is_accepted(oauth_env, caplog, served):
+    caplog.set_level(logging.INFO)
+    oauth_env(DATA_QUALITY_MCP_PUBLIC_URL="http://localhost:8001/")
+    server.main(["--transport", "http"])
+    assert "resource http://localhost:8001/mcp," in caplog.text
+    assert "host check: localhost:8001" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("overrides", "argv", "expected"),
+    [
+        (
+            {"DATA_QUALITY_MCP_TOKEN": TOKEN},
+            [],
+            "DATA_QUALITY_MCP_OAUTH_ISSUER and DATA_QUALITY_MCP_TOKEN are both set",
+        ),
+        ({}, ["--no-auth"], "--no-auth and DATA_QUALITY_MCP_OAUTH_ISSUER are both set"),
+        (
+            {"DATA_QUALITY_MCP_PUBLIC_URL": None},
+            [],
+            "DATA_QUALITY_MCP_PUBLIC_URL is required in OAuth mode",
+        ),
+        (
+            {"DATA_QUALITY_MCP_PUBLIC_URL": "  "},
+            [],
+            "DATA_QUALITY_MCP_PUBLIC_URL is required in OAuth mode",
+        ),
+        (
+            {"DATA_QUALITY_MCP_OAUTH_OWNER": None},
+            [],
+            "DATA_QUALITY_MCP_OAUTH_OWNER is required in OAuth mode",
+        ),
+        (
+            {"DATA_QUALITY_MCP_OAUTH_OWNER": "user 01"},
+            [],
+            "DATA_QUALITY_MCP_OAUTH_OWNER must not contain whitespace",
+        ),
+        (
+            {"DATA_QUALITY_MCP_OAUTH_ISSUER": "http://tenant.authkit.app"},
+            [],
+            "DATA_QUALITY_MCP_OAUTH_ISSUER must use https",
+        ),
+        (
+            {"DATA_QUALITY_MCP_OAUTH_ISSUER": ISSUER + "/"},
+            [],
+            "DATA_QUALITY_MCP_OAUTH_ISSUER must be exactly the issuer",
+        ),
+        (
+            {"DATA_QUALITY_MCP_OAUTH_ISSUER": ISSUER + "/oauth2"},
+            [],
+            "DATA_QUALITY_MCP_OAUTH_ISSUER must be exactly the issuer",
+        ),
+        (
+            {"DATA_QUALITY_MCP_OAUTH_ISSUER": ISSUER + "?x=1"},
+            [],
+            "DATA_QUALITY_MCP_OAUTH_ISSUER must not have a query or fragment",
+        ),
+        (
+            {"DATA_QUALITY_MCP_OAUTH_ISSUER": "tenant.authkit.app"},
+            [],
+            "DATA_QUALITY_MCP_OAUTH_ISSUER must be an https URL with a host",
+        ),
+        (
+            {"DATA_QUALITY_MCP_OAUTH_ISSUER": "https://user:pw@tenant.authkit.app"},
+            [],
+            "DATA_QUALITY_MCP_OAUTH_ISSUER must not contain a user name or password",
+        ),
+        (
+            {"DATA_QUALITY_MCP_PUBLIC_URL": "http://dq.example.onrender.com"},
+            [],
+            "DATA_QUALITY_MCP_PUBLIC_URL must use https",
+        ),
+        (
+            {"DATA_QUALITY_MCP_PUBLIC_URL": "https://dq.example.onrender.com/mcp"},
+            [],
+            "DATA_QUALITY_MCP_PUBLIC_URL must not have a path",
+        ),
+        (
+            {"DATA_QUALITY_MCP_PUBLIC_URL": "https://dq.example.onrender.com#x"},
+            [],
+            "DATA_QUALITY_MCP_PUBLIC_URL must not have a query or fragment",
+        ),
+        (
+            {"DATA_QUALITY_MCP_OAUTH_JWKS_URL": "http://tenant.authkit.app/jwks"},
+            [],
+            "DATA_QUALITY_MCP_OAUTH_JWKS_URL must use https",
+        ),
+        (
+            {"DATA_QUALITY_MCP_PUBLIC_URL": "https://[::1"},
+            [],
+            "DATA_QUALITY_MCP_PUBLIC_URL isn't a valid URL",
+        ),
+        (
+            {"DATA_QUALITY_MCP_PUBLIC_URL": "https://dq.example.com:abc"},
+            [],
+            "DATA_QUALITY_MCP_PUBLIC_URL isn't a valid URL",
+        ),
+        (
+            {"DATA_QUALITY_MCP_PUBLIC_URL": "https://dq.example.com:99999"},
+            [],
+            "DATA_QUALITY_MCP_PUBLIC_URL isn't a valid URL",
+        ),
+        (
+            {"DATA_QUALITY_MCP_PUBLIC_URL": "https://dq example.com"},
+            [],
+            "DATA_QUALITY_MCP_PUBLIC_URL has an invalid host",
+        ),
+        (
+            {"DATA_QUALITY_MCP_OAUTH_ISSUER": "https://t_auth.app"},
+            [],
+            "DATA_QUALITY_MCP_OAUTH_ISSUER has an invalid host",
+        ),
+    ],
+    ids=lambda value: "" if isinstance(value, (dict, list)) else None,
+)
+def test_bad_oauth_settings_stop_the_server(
+    oauth_env, capsys, caplog, served, overrides, argv, expected
+):
+    oauth_env(**overrides)
+    _refused(capsys, caplog, ["--transport", "http", *argv], expected)
+    assert served == {}
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://[::1]:8000",
+        "https://tenant.authkit.app",
+    ],
+)
+def test_http_is_accepted_on_loopback_only(url):
+    environ = {
+        **OAUTH_ENV,
+        "DATA_QUALITY_MCP_OAUTH_ISSUER": url,
+        "DATA_QUALITY_MCP_PUBLIC_URL": url,
+    }
+    settings = http_auth.read_oauth_settings(environ)
+    assert settings is not None
+    assert settings.resource == url + "/mcp"
+    assert settings.jwks_url == url + "/oauth2/jwks"
+
+
+@pytest.mark.parametrize(
+    ("url", "normalized", "host"),
+    [
+        ("https://DQ.Example.com", "https://dq.example.com", "dq.example.com"),
+        ("https://dq.example.com:443/", "https://dq.example.com", "dq.example.com"),
+        ("https://dq.example.com:8443", "https://dq.example.com:8443", None),
+        ("http://LOCALHOST:80", "http://localhost", "localhost"),
+        ("http://[::1]:8001", "http://[::1]:8001", "[::1]:8001"),
+    ],
+)
+def test_the_public_url_is_normalized(url, normalized, host):
+    # As the SDK advertises the resource, and as a client sends the Host
+    environ = {**OAUTH_ENV, "DATA_QUALITY_MCP_PUBLIC_URL": url}
+    settings = http_auth.read_oauth_settings(environ)
+    assert settings is not None
+    assert settings.resource == normalized + "/mcp"
+    assert settings.allowed_host == (host or normalized.split("//")[1])
+
+
+def test_an_explicit_jwks_url_is_used():
+    environ = {**OAUTH_ENV, "DATA_QUALITY_MCP_OAUTH_JWKS_URL": " https://k.example/j "}
+    settings = http_auth.read_oauth_settings(environ)
+    assert settings is not None and settings.jwks_url == "https://k.example/j"
+
+
+@pytest.mark.parametrize("issuer", ["", "   ", "\r\n"], ids=repr)
+def test_a_blank_issuer_means_oauth_is_off(oauth_env, capsys, caplog, served, issuer):
+    oauth_env(DATA_QUALITY_MCP_OAUTH_ISSUER=issuer)
+    _refused(
+        capsys,
+        caplog,
+        ["--transport", "http"],
+        "Set DATA_QUALITY_MCP_TOKEN to serve over HTTP",
+    )
+
+
+def test_leftover_oauth_variables_are_warned_about(monkeypatch, caplog, served):
+    caplog.set_level(logging.INFO)
+    monkeypatch.setenv("DATA_QUALITY_MCP_TOKEN", TOKEN)
+    monkeypatch.setenv("DATA_QUALITY_MCP_PUBLIC_URL", "https://dq.example.onrender.com")
+    monkeypatch.setenv("DATA_QUALITY_MCP_OAUTH_OWNER", OWNER)
+    server.main(["--transport", "http"])
+    assert "auth: bearer token" in caplog.text
+    assert "OAuth is off (DATA_QUALITY_MCP_OAUTH_ISSUER is unset)" in caplog.text
+    assert OWNER not in caplog.text  # the warning names variables, never values
+    assert "onrender.com" not in caplog.text
+    assert http_auth.leftover_oauth_variables(os.environ) == [
+        "DATA_QUALITY_MCP_PUBLIC_URL",
+        "DATA_QUALITY_MCP_OAUTH_OWNER",
+    ]
+
+
+def test_no_leftover_warning_without_oauth_variables(monkeypatch, caplog, served):
+    monkeypatch.setenv("DATA_QUALITY_MCP_TOKEN", TOKEN)
+    server.main(["--transport", "http"])
+    assert "OAuth is off" not in caplog.text
+
+
+def test_stdio_ignores_the_oauth_settings(oauth_env, served):
+    oauth_env(DATA_QUALITY_MCP_OAUTH_ISSUER="not a url")
+    server.main([])
+    assert served == {"stdio": True}
+
+
+def test_a_static_token_and_oauth_cant_be_combined_in_the_app():
+    settings = http_auth.read_oauth_settings(OAUTH_ENV)
+    assert settings is not None
+    with pytest.raises(ValueError, match="can't be combined"):
+        server.create_http_app(token=TOKEN, oauth=http_auth.OAuthTokenCheck(settings))

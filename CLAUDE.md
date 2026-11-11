@@ -5,7 +5,7 @@ Data Quality MCP Server: an MCP server that exposes deterministic dataset profil
 ## Invariants (apply to every milestone)
 
 ### Layer boundary (most important)
-- `profiler_core/`, `cleaner_core/`, and `config.py` are pure Python and **never import the MCP SDK (`mcp`, `mcp_types`) or a web stack (`starlette`, `uvicorn`, `httpx2`, `sse_starlette`)**. Only `tools/` and `server.py` may touch the MCP SDK. `http_auth.py` uses Starlette but not the SDK.
+- `profiler_core/`, `cleaner_core/`, and `config.py` are pure Python and **never import the MCP SDK (`mcp`, `mcp_types`) or a web stack (`starlette`, `uvicorn`, `httpx2`, `sse_starlette`), or the JWT library (`jwt`)**. Only `tools/` and `server.py` may touch the MCP SDK. `http_auth.py` uses Starlette and PyJWT but not the SDK.
 - `tests/test_architecture.py` enforces this. Never weaken, skip, or work around it.
 - Registration pattern: each `tools/*.py` module defines plain functions plus `register(app: MCPServer) -> None` (MCP SDK v2: `from mcp.server import MCPServer`; v1's `FastMCP` no longer exists). `server.py` creates the app and calls each `register(app)`. Tool modules never import a global app from `server.py`.
 - Tools are thin adapters: parse args, call the core, shape the response. If a tool function has real logic in it, that logic belongs in the core.
@@ -22,7 +22,7 @@ Data Quality MCP Server: an MCP server that exposes deterministic dataset profil
 
 ### stdio hygiene
 - No `print()` anywhere in `src/`. Over stdio, stdout is the JSON-RPC channel. Log to stderr with the `logging` module.
-- Over HTTP, logs go to stderr too, and never include the token or request bodies.
+- Over HTTP, logs go to stderr too, and never include a token (static or OAuth), its claims, or request bodies.
 
 ### Configuration
 - Defaults live in `config.py`. Core functions take thresholds and limits as keyword parameters that default to the config values, rather than reading globals deep inside the logic.
@@ -44,6 +44,7 @@ Data Quality MCP Server: an MCP server that exposes deterministic dataset profil
 - Code must work on both pandas 2 (Python 3.10) and pandas 3 (Python 3.11+); for example, string columns are dtype `object` on pandas 2 and `str` on pandas 3. CI tests both.
 - Commit messages and PR titles follow Conventional Commits (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`, `ci:`). Use `docs:`, not `doc:`, because commitlint rejects `doc:`.
 - Every change goes through a PR: create a branch, open a PR, wait for the CI checks to pass, then squash-merge. Claude never pushes directly to `main`. The `main protection` ruleset enforces this; only the repo owner can bypass it, and that's for the owner's own deliberate use. If CI job names or the test matrix change, the ruleset's required-check list must be updated too. The PR title becomes the squash commit message, so it must pass commitlint.
+- The live deployment stays on free tiers, with no payment method on any account it uses (milestone-4.5.md). A change that would need one is a decision for the owner, never part of a PR.
 - Before opening any PR, run the `pre-pr-review` skill (`.claude/skills/pre-pr-review/`). It runs two reviewers in parallel, the `standard-reviewer` subagent and a Codex correctness review, and has you fix the blocking findings. A PreToolUse hook (`.claude/hooks/pre_pr_review.py`) blocks `gh pr create` until the current commit is marked as reviewed. Codex's review rules live in `AGENTS.md`.
 - On an open PR, read every CI Claude review comment, including the latest. Keep fixing while a round raises a real issue: a bug, a contract or behaviour change, a security issue, or a wrong figure. Stop when a round has only nits, repeats or points already covered, and report those to the user instead of pushing again. Check in with the user after about three rounds.
 - Each milestone starts with a spec PR (`planning/milestone-N.md`), reviewed and merged before any implementation. A spec that changes the report schema must say so in a dedicated **Schema changes** section, so reviewers know to check it. Then use plan mode to plan the implementation. The plan should state how the milestone respects the layer boundary.

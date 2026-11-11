@@ -2,7 +2,7 @@
 
 1. The core (profiler_core/, cleaner_core/, config.py) never imports the MCP
    SDK or a web stack, so it stays transport-agnostic.
-2. http_auth.py, the HTTP middleware, uses Starlette but never the MCP SDK.
+2. http_auth.py, the HTTP auth, uses Starlette and PyJWT but never the MCP SDK.
 3. Nothing under src/ calls print(): over stdio, stdout is the JSON-RPC channel.
 """
 
@@ -20,6 +20,8 @@ CORE_PATHS = [
 # The SDK's own packages, and the web stack it brings (planning/milestone-4.md)
 SDK_PACKAGES = {"mcp", "mcp_types"}
 WEB_PACKAGES = {"starlette", "uvicorn", "httpx2", "sse_starlette"}
+# The JWT library behind OAuth mode (planning/milestone-4.5.md)
+AUTH_PACKAGES = {"jwt"}
 
 
 def _python_files(path: Path) -> list[Path]:
@@ -54,19 +56,19 @@ def _imports_from(path: Path, packages: set[str]) -> list[str]:
 
 @pytest.mark.parametrize("path", _core_files(), ids=lambda p: p.name)
 def test_core_never_imports_mcp(path: Path):
-    offending = _imports_from(path, SDK_PACKAGES | WEB_PACKAGES)
+    offending = _imports_from(path, SDK_PACKAGES | WEB_PACKAGES | AUTH_PACKAGES)
     assert not offending, (
         f"{path.relative_to(PACKAGE)} imports {offending}. The core must stay "
         "transport-agnostic: only tools/ and server.py may import mcp, and the "
-        "web stack stays outside the core too."
+        "web stack and the JWT library stay outside the core too."
     )
 
 
 def test_http_auth_never_imports_mcp():
     offending = _imports_from(PACKAGE / "http_auth.py", SDK_PACKAGES)
     assert not offending, (
-        f"http_auth.py imports {offending}. The middleware uses Starlette only, "
-        "so it can't depend on the SDK's auth stack."
+        f"http_auth.py imports {offending}. The HTTP auth uses Starlette and "
+        "PyJWT only, so it can't depend on the SDK."
     )
 
 
@@ -75,13 +77,14 @@ def test_forbidden_imports_are_detected(tmp_path: Path):
     sample = tmp_path / "sample.py"
     sample.write_text(
         "import mcp_types\nfrom starlette.requests import Request\n"
-        "import mcpx\nfrom uvicorn import run\n",
+        "import mcpx\nfrom uvicorn import run\nimport jwt\nimport jwtx\n",
         encoding="utf-8",
     )
-    assert _imports_from(sample, SDK_PACKAGES | WEB_PACKAGES) == [
+    assert _imports_from(sample, SDK_PACKAGES | WEB_PACKAGES | AUTH_PACKAGES) == [
         "mcp_types",
         "starlette.requests",
         "uvicorn",
+        "jwt",
     ]
 
 
