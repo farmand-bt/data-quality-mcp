@@ -31,7 +31,7 @@ import time
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 import jwt
 from jwt import PyJWK, PyJWKSet
@@ -68,6 +68,10 @@ MAX_JWKS_BYTES = 1024 * 1024
 # RFC 6750 b64token: letters, digits and -._~+/, then optional trailing "="
 _TOKEN_FORMAT = re.compile(r"[A-Za-z0-9\-._~+/]+=*")
 _BEARER = re.compile(r"bearer +(\S+)", re.IGNORECASE)
+# What urlsplit's (lowercased) hostname may be: a DNS name or an IPv4 address,
+# or an IPv6 address (its brackets already removed)
+_HOSTNAME = re.compile(r"[a-z0-9]([a-z0-9.-]*[a-z0-9])?")
+_IPV6 = re.compile(r"[0-9a-f:.]+")
 
 logger = logging.getLogger("data_quality_mcp.http")
 
@@ -120,13 +124,16 @@ class OAuthSettings:
         return urlsplit(self.public_url).netloc
 
 
-def _check_url(name: str, value: str, *, path_allowed: bool) -> str:
-    """Validate an OAuth URL; return its path. Raises StartupError."""
+def _check_url(name: str, value: str, *, path_allowed: bool) -> SplitResult:
+    """Validate an OAuth URL and return its parts. Raises StartupError."""
     try:
         parts = urlsplit(value)
         host = parts.hostname
+        parts.port  # noqa: B018 -- raises ValueError for a bad port
     except ValueError:
         raise StartupError(f"{name} isn't a valid URL: {value!r}") from None
+    if host and not (_HOSTNAME.fullmatch(host) or _IPV6.fullmatch(host)):
+        raise StartupError(f"{name} has an invalid host: {value!r}")
     if parts.scheme == "http" and host not in LOOPBACK_HOSTS:
         raise StartupError(
             f"{name} must use https (http only on localhost, 127.0.0.1 or "
@@ -140,7 +147,20 @@ def _check_url(name: str, value: str, *, path_allowed: bool) -> str:
         raise StartupError(f"{name} must not have a query or fragment: {value!r}")
     if not path_allowed and parts.path not in ("", "/"):
         raise StartupError(f"{name} must not have a path: {value!r}")
-    return parts.path
+    return parts
+
+
+def _origin(parts: SplitResult) -> str:
+    """scheme://host[:port], with the host lowercased (urlsplit does that) and a
+    default port dropped: the form the SDK advertises the resource in, and the
+    Host header a client sends."""
+    host = parts.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    port = parts.port
+    if port is not None and port != {"http": 80, "https": 443}[parts.scheme]:
+        host = f"{host}:{port}"
+    return f"{parts.scheme}://{host}"
 
 
 def read_oauth_settings(environ: Mapping[str, str]) -> OAuthSettings | None:
@@ -153,7 +173,7 @@ def read_oauth_settings(environ: Mapping[str, str]) -> OAuthSettings | None:
     issuer = environ.get(OAUTH_ISSUER_ENV, "").strip()
     if not issuer:
         return None
-    if _check_url(OAUTH_ISSUER_ENV, issuer, path_allowed=True):
+    if _check_url(OAUTH_ISSUER_ENV, issuer, path_allowed=True).path:
         raise StartupError(
             f"{OAUTH_ISSUER_ENV} must be exactly the issuer, with no path or "
             f"trailing slash (e.g. https://<tenant>.authkit.app): {issuer!r}"
@@ -165,8 +185,9 @@ def read_oauth_settings(environ: Mapping[str, str]) -> OAuthSettings | None:
             f"{PUBLIC_URL_ENV} is required in OAuth mode: the server's public "
             "address, e.g. https://<service>.onrender.com"
         )
-    _check_url(PUBLIC_URL_ENV, public_url, path_allowed=False)
-    public_url = public_url.rstrip("/")
+    # Normalized, so the audience, the advertised resource and the allowed
+    # Host all read the same: https://DQ.example.com:443/ -> https://dq.example.com
+    public_url = _origin(_check_url(PUBLIC_URL_ENV, public_url, path_allowed=False))
 
     owner = environ.get(OAUTH_OWNER_ENV, "").strip()
     if not owner:
@@ -284,6 +305,9 @@ class JwksCache:
     - One fetch at a time. A check whose kid is in the current set, even an
       expired one, never waits for another check's fetch. A check with no
       usable key waits for the fetch in flight, up to FETCH_TIMEOUT.
+    - FETCH_TIMEOUT bounds each socket operation of the fetch (urllib's
+      timeout), not the fetch as a whole, so a slowly dripping response can
+      keep it in flight longer. Waiters still give up after FETCH_TIMEOUT.
     - A fetch starts only FETCH_BACKOFF after the previous attempt. That is the
       backoff after a failure, and the limit on refreshes for unknown kids.
     - A failed refresh keeps the last good set (stale-if-error): a short outage
@@ -342,7 +366,10 @@ class JwksCache:
         try:
             fetched = self._fetch(self._url, FETCH_TIMEOUT)
             keys = {key.key_id: key for key in fetched.keys if _usable(key)}
+            if not keys:  # e.g. only EC keys: keep the last good set
+                raise JwksError("no usable RS256 key")
         except Exception as exc:
+            keys = None
             logger.warning(
                 "JWKS fetch failed (%s); keeping %s, next attempt in %d s",
                 type(exc).__name__,

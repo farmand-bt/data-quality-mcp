@@ -19,7 +19,7 @@ services:
       - key: PORT
         value: "8000"
       # Limits for 512 MB / 0.1 CPU, measured in a capped container (D7, and
-      # docs/deployment.md). Every worst case peaked under 320 MiB; the XLSX
+      # docs/deployment.md). Every worst case peaked at or under 309 MiB; the XLSX
       # expansion cap keeps the slowest call (a numeric XLSX) under 60 s.
       - key: DATA_QUALITY_MCP_MAX_HTTP_REQUEST_MB
         value: "8"

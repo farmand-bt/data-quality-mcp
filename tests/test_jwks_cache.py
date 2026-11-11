@@ -208,6 +208,19 @@ def test_only_rs256_signing_keys_with_a_kid_are_kept():
         assert cache.get_key(kid) is None
 
 
+def test_a_set_with_no_usable_key_is_a_failed_fetch(caplog):
+    fetcher, clock = FakeFetcher(), FakeClock()
+    cache = make_cache(fetcher, clock)
+    old = cache.get_key(KID)
+    fetcher.result = key_set(jwk(kid=KID, alg="RS512"))
+    clock.advance(JWKS_TTL)
+    assert cache.get_key(KID) is old  # not signed out by an odd key set
+    assert fetch_failures(caplog) == [
+        "JWKS fetch failed (JwksError); keeping the last good key set, "
+        f"next attempt in {FETCH_BACKOFF} s"
+    ]
+
+
 def test_prechecks_never_reach_the_fetcher():
     fetcher = FakeFetcher()
     check = OAuthTokenCheck(settings(), cache=make_cache(fetcher))

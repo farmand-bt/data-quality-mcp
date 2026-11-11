@@ -23,10 +23,10 @@ import webbrowser
 from urllib.parse import parse_qs, urlsplit
 
 import anyio
+import httpx2
 from mcp.client import Client
 from mcp.client.auth import OAuthClientProvider, TokenStorage
 from mcp.client.streamable_http import streamable_http_client
-from mcp.shared._httpx_utils import create_mcp_http_client
 from mcp.shared.auth import (
     AuthorizationCodeResult,
     OAuthClientInformationFull,
@@ -119,7 +119,8 @@ def make_csv(rows: int) -> str:
 
 async def run(url: str, rows: int, port: int) -> None:
     callback = Callback(port)
-    redirect_uri = f"http://localhost:{port}/callback"
+    # The same loopback literal the callback listens on (RFC 8252)
+    redirect_uri = f"http://127.0.0.1:{port}/callback"
     auth = OAuthClientProvider(
         server_url=url,
         client_metadata=OAuthClientMetadata(
@@ -135,7 +136,8 @@ async def run(url: str, rows: int, port: int) -> None:
     )
     csv = make_csv(rows)
     print(f"CSV: {rows:,} rows, {len(csv) / 1e6:.1f} MB")
-    async with create_mcp_http_client(auth=auth) as http_client:
+    timeout = httpx2.Timeout(30, read=600)  # a large profile takes a while
+    async with httpx2.AsyncClient(auth=auth, timeout=timeout) as http_client:
         transport = streamable_http_client(url, http_client=http_client)
         async with Client(transport) as client:
             tools = await client.list_tools()

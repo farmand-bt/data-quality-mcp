@@ -28,7 +28,7 @@ from oauth_helpers import (
 )
 from starlette.testclient import TestClient
 
-from data_quality_mcp.http_auth import JwksCache, OAuthTokenCheck
+from data_quality_mcp.http_auth import JwksCache, OAuthTokenCheck, read_oauth_settings
 from data_quality_mcp.server import (
     OwnerTokenVerifier,
     create_http_app,
@@ -237,6 +237,24 @@ def test_the_public_host_is_accepted_and_a_foreign_one_refused(client):
     assert foreign.status_code == 421
     no_port = post_mcp(client, mint(), headers={"Host": "localhost"})
     assert no_port.status_code == 421
+
+
+def test_a_public_url_in_another_form_still_matches_the_sdk():
+    # Upper case and a default port: the audience, the advertised resource and
+    # the allowed Host must still agree
+    environ = {
+        "DATA_QUALITY_MCP_OAUTH_ISSUER": ISSUER,
+        "DATA_QUALITY_MCP_PUBLIC_URL": "https://DQ.Example.com:443/",
+        "DATA_QUALITY_MCP_OAUTH_OWNER": OWNER,
+    }
+    configured = read_oauth_settings(environ)
+    assert configured is not None
+    check = OAuthTokenCheck(configured, cache=JwksCache("x", fetch=FakeFetcher()))
+    app = create_http_app(token=None, oauth=check)
+    with TestClient(app, base_url="https://dq.example.com") as c:
+        assert c.get(METADATA_PATH).json()["resource"] == configured.resource
+        token = mint(aud="https://dq.example.com/mcp")
+        assert post_mcp(c, token).status_code == 200
 
 
 def test_an_explicit_allowed_hosts_list_replaces_the_default():

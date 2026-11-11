@@ -445,6 +445,26 @@ def test_a_public_url_with_a_trailing_slash_is_accepted(oauth_env, caplog, serve
             [],
             "DATA_QUALITY_MCP_PUBLIC_URL isn't a valid URL",
         ),
+        (
+            {"DATA_QUALITY_MCP_PUBLIC_URL": "https://dq.example.com:abc"},
+            [],
+            "DATA_QUALITY_MCP_PUBLIC_URL isn't a valid URL",
+        ),
+        (
+            {"DATA_QUALITY_MCP_PUBLIC_URL": "https://dq.example.com:99999"},
+            [],
+            "DATA_QUALITY_MCP_PUBLIC_URL isn't a valid URL",
+        ),
+        (
+            {"DATA_QUALITY_MCP_PUBLIC_URL": "https://dq example.com"},
+            [],
+            "DATA_QUALITY_MCP_PUBLIC_URL has an invalid host",
+        ),
+        (
+            {"DATA_QUALITY_MCP_OAUTH_ISSUER": "https://t_auth.app"},
+            [],
+            "DATA_QUALITY_MCP_OAUTH_ISSUER has an invalid host",
+        ),
     ],
     ids=lambda value: "" if isinstance(value, (dict, list)) else None,
 )
@@ -475,6 +495,25 @@ def test_http_is_accepted_on_loopback_only(url):
     assert settings is not None
     assert settings.resource == url + "/mcp"
     assert settings.jwks_url == url + "/oauth2/jwks"
+
+
+@pytest.mark.parametrize(
+    ("url", "normalized", "host"),
+    [
+        ("https://DQ.Example.com", "https://dq.example.com", "dq.example.com"),
+        ("https://dq.example.com:443/", "https://dq.example.com", "dq.example.com"),
+        ("https://dq.example.com:8443", "https://dq.example.com:8443", None),
+        ("http://LOCALHOST:80", "http://localhost", "localhost"),
+        ("http://[::1]:8001", "http://[::1]:8001", "[::1]:8001"),
+    ],
+)
+def test_the_public_url_is_normalized(url, normalized, host):
+    # As the SDK advertises the resource, and as a client sends the Host
+    environ = {**OAUTH_ENV, "DATA_QUALITY_MCP_PUBLIC_URL": url}
+    settings = http_auth.read_oauth_settings(environ)
+    assert settings is not None
+    assert settings.resource == normalized + "/mcp"
+    assert settings.allowed_host == (host or normalized.split("//")[1])
 
 
 def test_an_explicit_jwks_url_is_used():

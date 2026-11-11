@@ -462,18 +462,20 @@ Merging this spec also approves these `CLAUDE.md` changes, made in the implement
 **Deviations from the text above, all small:**
 - **The worker thread:** the check runs through `starlette.concurrency.run_in_threadpool`, which is `anyio.to_thread.run_sync` underneath. That's Starlette, already a declared dependency, rather than importing `anyio` directly.
 - **The XLSX expansion cap** on Render is 35 MB, not the proposed 60 MB, and the row cap stays at 100,000. See the sizing below.
-- **The JWKS keys kept:** RSA keys with a `kid`, whose algorithm is RS256 (stated, or PyJWT's default for RSA), and whose `use` is missing or `sig`. Other keys in the set are dropped.
+- **The JWKS keys kept:** RSA keys with a `kid`, whose algorithm is RS256 (stated, or PyJWT's default for RSA), and whose `use` is missing or `sig`. Other keys in the set are dropped. A fetched set with no usable key counts as a failed fetch, so the last good set stays.
+- **The public URL is normalized,** beyond dropping a trailing slash: the host is lowercased and a default port dropped. That's the form the SDK advertises the resource in, and the `Host` a client sends, so the audience, the metadata and the allowed host always agree. A bad port or host in any of the URLs is a startup error (status 2), not a traceback.
+- **The fetch timeout** (5 s) bounds each socket operation, as urllib's timeout does, not the whole fetch. Waiters still give up after 5 s.
 - **Two defensive re-checks** after `jwt.decode` are marked `pragma: no cover`, because the precheck and PyJWT already cover them: `sub` equals the owner, and `exp` is a number.
 
 **Sizing (D7)** is in [`docs/deployment.md`](../docs/deployment.md#limits-on-the-free-instance). Measured locally under `--memory=512m --memory-swap=512m --cpus=0.1`:
 - **Memory:** every worst case peaked at or under 309 MiB, against the 400 MiB rule. The idle server was 173 MiB.
 - **Time:** the slowest call at the proposed limits was a numeric XLSX: 99,999 rows × 14 columns, 72.6 s.
-  - The time follows the cell count, about 50 s per million numeric cells at 0.1 CPU, not the rows: 28 columns at half the rows took 45.8 s.
+  - The time follows the cell count, about 50 s per million numeric cells at 0.1 CPU, not the rows: at about 0.99M cells each, 70,699 rows × 14 columns took 51.7 s and 35,349 rows × 28 columns took 45.8 s.
   - So the expansion cap came down to 35 MB, about a million numeric cells. The slowest case is now 51.7 s.
 - **Startup:** from `docker run` to a healthy `/health` took 24–33 s at 0.1 CPU.
 - **The final values:** request 8 MB, file 8 MB, expansion 35 MB, 100,000 rows, inline output 1 MB.
 
-**Tests:** 858 pass, on Python 3.12 with pandas 3 and on Python 3.10 with pandas 2.3.3. Coverage is 98%.
+**Tests:** 869 pass, on Python 3.12 with pandas 3 and on Python 3.10 with pandas 2.3.3. Coverage is 98%.
 - **The new files:** `test_oauth.py`, `test_jwks_cache.py` and `oauth_helpers.py`. `test_server_main.py` gains the startup cases.
 - **Beyond D9's list:**
   - a test pins the OAuth app's three routes, so a route a later SDK adds can't go unauthenticated while the static middleware is off
