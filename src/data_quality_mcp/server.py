@@ -308,11 +308,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     except StartupError as exc:
         logger.error("data-quality-mcp: %s", exc)
         sys.exit(2)
-    for name in leftover_oauth_variables(os.environ):
+    if leftover_oauth_variables(os.environ):
+        # A fixed message: only names are involved, but CodeQL treats anything
+        # derived from the OAuth variables as sensitive
         logger.warning(
-            "%s is set but OAuth is off (DATA_QUALITY_MCP_OAUTH_ISSUER is "
-            "unset), so it is ignored",
-            name,
+            "OAuth is off (DATA_QUALITY_MCP_OAUTH_ISSUER is unset), so "
+            "DATA_QUALITY_MCP_PUBLIC_URL, DATA_QUALITY_MCP_OAUTH_OWNER and "
+            "DATA_QUALITY_MCP_OAUTH_JWKS_URL are ignored, although at least one "
+            "of them is set"
         )
     # Lazy: the key set is fetched on the first token, never at startup
     oauth = OAuthTokenCheck(settings) if settings is not None else None

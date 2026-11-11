@@ -540,9 +540,19 @@ def test_leftover_oauth_variables_are_warned_about(monkeypatch, caplog, served):
     monkeypatch.setenv("DATA_QUALITY_MCP_OAUTH_OWNER", OWNER)
     server.main(["--transport", "http"])
     assert "auth: bearer token" in caplog.text
-    for name in ("DATA_QUALITY_MCP_PUBLIC_URL", "DATA_QUALITY_MCP_OAUTH_OWNER"):
-        assert f"{name} is set but OAuth is off" in caplog.text
-    assert "DATA_QUALITY_MCP_OAUTH_JWKS_URL is set" not in caplog.text
+    assert "OAuth is off (DATA_QUALITY_MCP_OAUTH_ISSUER is unset)" in caplog.text
+    assert OWNER not in caplog.text  # the warning names variables, never values
+    assert "onrender.com" not in caplog.text
+    assert http_auth.leftover_oauth_variables(os.environ) == [
+        "DATA_QUALITY_MCP_PUBLIC_URL",
+        "DATA_QUALITY_MCP_OAUTH_OWNER",
+    ]
+
+
+def test_no_leftover_warning_without_oauth_variables(monkeypatch, caplog, served):
+    monkeypatch.setenv("DATA_QUALITY_MCP_TOKEN", TOKEN)
+    server.main(["--transport", "http"])
+    assert "OAuth is off" not in caplog.text
 
 
 def test_stdio_ignores_the_oauth_settings(oauth_env, served):

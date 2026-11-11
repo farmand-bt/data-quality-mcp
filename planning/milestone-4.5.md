@@ -475,7 +475,7 @@ Merging this spec also approves these `CLAUDE.md` changes, made in the implement
 - **Startup:** from `docker run` to a healthy `/health` took 24–33 s at 0.1 CPU.
 - **The final values:** request 8 MB, file 8 MB, expansion 35 MB, 100,000 rows, inline output 1 MB.
 
-**Tests:** 869 pass, on Python 3.12 with pandas 3 and on Python 3.10 with pandas 2.3.3. Coverage is 98%.
+**Tests:** 870 pass, on Python 3.12 with pandas 3 and on Python 3.10 with pandas 2.3.3. Coverage is 98%.
 - **The new files:** `test_oauth.py`, `test_jwks_cache.py` and `oauth_helpers.py`. `test_server_main.py` gains the startup cases.
 - **Beyond D9's list:**
   - a test pins the OAuth app's three routes, so a route a later SDK adds can't go unauthenticated while the static middleware is off
